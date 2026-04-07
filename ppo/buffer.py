@@ -78,6 +78,7 @@ class RolloutBuffer:
         self.hidden_states   = np.zeros((T, N, self.hidden_dim),  dtype=np.float32)
         self.concept_values  = np.zeros((T, N),                   dtype=np.float32)
         self.concept_log_probs = np.zeros((T, N),                 dtype=np.float32)
+        self.concept_rewards = np.zeros((T, N),                   dtype=np.float32)
         self.actions         = np.zeros((T, N, self.action_dim),  dtype=np.float32)
         self.rewards         = np.zeros((T, N),                   dtype=np.float32)
         self.values          = np.zeros((T, N),                   dtype=np.float32)
@@ -112,6 +113,7 @@ class RolloutBuffer:
         hidden_state: Optional[np.ndarray] = None,
         concept_value: Optional[torch.Tensor] = None,
         concept_log_prob: Optional[np.ndarray] = None,
+        concept_reward: Optional[np.ndarray] = None,
     ) -> None:
         t = self.pos
         N = self.n_envs
@@ -135,6 +137,8 @@ class RolloutBuffer:
             self.concept_values[t] = concept_value.detach().cpu().numpy().flatten()[:N]
         if concept_log_prob is not None:
             self.concept_log_probs[t] = np.array(concept_log_prob).reshape(N)
+        if concept_reward is not None:
+            self.concept_rewards[t] = np.array(concept_reward).reshape(N)
 
         self.pos += 1
         if self.pos == self.buffer_size:
@@ -181,20 +185,16 @@ class RolloutBuffer:
         dones: np.ndarray,
     ) -> None:
         """
-        Simple TD(0)-style returns for the concept critic.
-        concept_returns[t] = r_c[t] + gamma * V_c(t+1)
-        concept_advantages[t] = concept_returns[t] - V_c[t]
+        GAE for the concept critic (mirrors compute_returns_and_advantage).
+        concept_advantages[t] = delta_t + gamma * lambda * (1-done) * A_{t+1}
+          where delta_t = r_c[t] + gamma * V_c(t+1) * (1-done) - V_c[t]
+        concept_returns[t] = concept_advantages[t] + V_c[t]
 
-        r_c[t] is the concept accuracy reward stored externally before calling
-        this method — here it is approximated as zero (the buffer stores concept
-        ground truth; the concept reward r_c is computed inside ppo.py and placed
-        in a separate array concept_rewards if needed, but for simplicity we use
-        the concept_values buffer directly).
-
-        In practice, ppo.py calls this AFTER populating self.concept_values with
-        the concept accuracy rewards already baked in as a single-step return.
+        r_c[t] is the concept accuracy reward stored in self.concept_rewards,
+        computed during rollout collection in ppo.py.
         """
         last_cv = last_concept_values.detach().cpu().numpy().flatten()
+        last_gae = 0.0
 
         for step in reversed(range(self.buffer_size)):
             if step == self.buffer_size - 1:
@@ -204,15 +204,15 @@ class RolloutBuffer:
                 next_non_terminal = 1.0 - self.episode_starts[step + 1]
                 next_cv = self.concept_values[step + 1]
 
-            # concept_rewards[t] is stored separately; here we treat it as 0
-            # because ppo.py passes concept_value slot for the raw V_c estimates
-            # and computes r_c separately.  The actual concept_returns are
-            # assembled in ppo.py after this call.
-            self.concept_returns[step] = (
-                self.gamma * next_cv * next_non_terminal
+            delta = (
+                self.concept_rewards[step]
+                + self.gamma * next_cv * next_non_terminal
+                - self.concept_values[step]
             )
+            last_gae = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae
+            self.concept_advantages[step] = last_gae
 
-        self.concept_advantages = self.concept_returns - self.concept_values
+        self.concept_returns = self.concept_advantages + self.concept_values
 
     # ------------------------------------------------------------------
     # Minibatch generator
@@ -266,6 +266,7 @@ class RolloutBuffer:
             "returns",
             "concept_values",
             "concept_log_probs",
+            "concept_rewards",
             "concept_advantages",
             "concept_returns",
             "episode_starts",
@@ -295,6 +296,7 @@ class RolloutBuffer:
             "returns",
             "concept_values",
             "concept_log_probs",
+            "concept_rewards",
             "concept_advantages",
             "concept_returns",
         ]:

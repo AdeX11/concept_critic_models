@@ -26,7 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from envs.cartpole        import make_cartpole_env,          make_single_cartpole_env
 from envs.dynamic_obstacles import make_dynamic_obstacles_env, make_single_dynamic_obstacles_env
-from envs.lunar_lander    import make_lunar_lander_env,      make_single_lunar_lander_env
+from envs.lunar_lander    import (make_lunar_lander_env,           make_single_lunar_lander_env,
+                                   make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
+                                   make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
+from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
 from ppo.ppo              import PPO
 
 
@@ -64,17 +67,27 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander":
         vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
         single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
+    elif env_name == "lunar_lander_state":
+        vec_env    = make_lunar_lander_state_env(n_envs, seed)
+        single_env = make_single_lunar_lander_state_env(seed)
+    elif env_name == "lunar_lander_pos_only":
+        vec_env    = make_lunar_lander_pos_only_env(n_envs, seed)
+        single_env = make_single_lunar_lander_pos_only_env(seed)
+    elif env_name == "mountain_car":
+        vec_env    = make_mountain_car_env(n_envs, seed)
+        single_env = make_single_mountain_car_env(seed)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
     policy_kwargs = dict(
-        obs_shape   = get_obs_shape(vec_env),
-        n_actions   = vec_env.single_action_space.n,
-        task_types  = single_env.task_types,
-        num_classes = single_env.num_classes,
-        concept_dim = len(single_env.task_types),
-        features_dim = 512,
-        net_arch    = [64, 64],
+        obs_shape     = get_obs_shape(single_env),
+        n_actions     = vec_env.single_action_space.n,
+        task_types    = single_env.task_types,
+        num_classes   = single_env.num_classes,
+        concept_dim   = len(single_env.task_types),
+        concept_names = single_env.concept_names,
+        features_dim  = 512,
+        net_arch      = [64, 64],
     )
     return vec_env, single_env, policy_kwargs
 
@@ -88,21 +101,23 @@ def main() -> None:
     parser.add_argument("--method", required=True,
                         choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
     parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander"])
+                        choices=["cartpole", "dynamic_obstacles", "lunar_lander",
+                                 "lunar_lander_state", "lunar_lander_pos_only",
+                                 "mountain_car"])
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "
                              "'gru' (GRUCell in network), 'stacked' (env-level frame stack), "
                              "'none' (no temporal info, ablation)")
     parser.add_argument("--training_mode", type=str, default="two_phase",
-                        choices=["two_phase", "end_to_end"],
+                        choices=["two_phase", "end_to_end", "joint"],
                         help="'two_phase': concept net frozen during PPO update (LICORICE-style); "
                              "'end_to_end': policy gradient flows through concept net jointly")
     parser.add_argument("--seed",              type=int,   default=42)
     parser.add_argument("--total_timesteps",   type=int,   default=1_000_000)
     parser.add_argument("--num_labels",        type=int,   default=500,
                         help="Total labeled samples across all queries")
-    parser.add_argument("--query_num_times",   type=int,   default=2,
+    parser.add_argument("--query_num_times",   type=int,   default=1,
                         help="How many times to query labels during training")
     parser.add_argument("--n_envs",            type=int,   default=4)
     parser.add_argument("--n_steps",           type=int,   default=512)
@@ -116,7 +131,7 @@ def main() -> None:
     parser.add_argument("--lambda_s",          type=float, default=0.5,
                         help="Supervised anchor loss weight (concept_actor_critic only)")
     parser.add_argument("--device",            type=str,   default="auto")
-    parser.add_argument("--output_dir",        type=str,   default="results")
+    parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -182,6 +197,15 @@ def main() -> None:
     model_path = os.path.join(out_dir, "model.pt")
     torch.save(model.policy.state_dict(), model_path)
     print(f"[train] saved model → {model_path}")
+
+    if model.concept_acc_log:
+        timesteps = np.array([t for t, _ in model.concept_acc_log], dtype=np.int64)
+        names     = list(model.concept_acc_log[0][1].keys())
+        values    = np.array([[d[n] for n in names]
+                               for _, d in model.concept_acc_log], dtype=np.float32)
+        np.savez(os.path.join(out_dir, "concept_acc.npz"),
+                 timesteps=timesteps, names=np.array(names), values=values)
+        print(f"[train] saved concept accuracy log → {out_dir}/concept_acc.npz")
 
     # ---- Quick evaluation ----
     mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)

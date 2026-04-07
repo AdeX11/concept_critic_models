@@ -1,23 +1,23 @@
 #!/bin/bash
-# run_all.sh — launch 4 experiments in parallel sharing 1 GPU, then plot results.
+# run_mc_long.sh — long MountainCar comparison
+#   Methods: no_concept | vanilla_freeze | concept_actor_critic (joint)
+#   All trained for 2M timesteps, 8 envs, seed 42
 #
-# Methods:
-#   0. no_concept                         — plain PPO baseline
-#   1. vanilla_freeze                     — LICORICE supervised CBM
-#   2. concept_actor_critic (gru)         — new method with temporal encoding
-#   3. concept_actor_critic (none)        — new method without temporal encoding (ablation)
+# Usage: bash run_mc_long.sh
 
 set -e
 
-ENV=lunar_lander_state
+ENV=mountain_car
 TS=2000000
-N_ENVS=16
+N_ENVS=8
 SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results
-PLOTS_DIR=plots
+RESULTS_DIR=/glade/derecho/scratch/adadelek/results/mc_long
+PLOTS_DIR=plots/mc_long
+
+mkdir -p $RESULTS_DIR $PLOTS_DIR
 
 echo "========================================"
-echo "Starting 4 parallel training runs (shared GPU)"
+echo "MountainCar (long): No Concept vs Vanilla Freeze vs Concept AC (joint)"
 echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
@@ -28,41 +28,35 @@ python train.py \
     --device cuda \
     --output_dir $RESULTS_DIR &
 PID0=$!
+echo "no_concept PID=$PID0"
 
 python train.py \
     --method vanilla_freeze \
     --training_mode two_phase \
+    --query_num_times 1 \
     --env $ENV --seed $SEED \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
 PID1=$!
+echo "vanilla_freeze PID=$PID1"
 
 python train.py \
     --method concept_actor_critic \
-    --temporal_encoding gru \
-    --training_mode two_phase \
+    --temporal_encoding none \
+    --training_mode joint \
+    --query_num_times 1 \
     --env $ENV --seed $SEED \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
 PID2=$!
+echo "concept_ac_joint PID=$PID2"
 
-python train.py \
-    --method concept_actor_critic \
-    --temporal_encoding none \
-    --training_mode two_phase \
-    --env $ENV --seed $SEED \
-    --total_timesteps $TS --n_envs $N_ENVS \
-    --device cuda \
-    --output_dir $RESULTS_DIR &
-PID3=$!
-
-wait $PID0 $PID1 $PID2 $PID3
-echo "Training done."
-
+wait $PID0 $PID1 $PID2
+echo ""
 echo "========================================"
-echo "Generating plots..."
+echo "Training done. Generating plots..."
 echo "========================================"
 
 python plot_results.py \
@@ -70,4 +64,5 @@ python plot_results.py \
     --results_dir $RESULTS_DIR \
     --output_dir $PLOTS_DIR
 
-echo "Complete. Plots saved to $PLOTS_DIR/"
+echo ""
+echo "Done. Results in $RESULTS_DIR  Plots in $PLOTS_DIR"

@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from envs.cartpole          import make_cartpole_env,           make_single_cartpole_env
 from envs.dynamic_obstacles import make_dynamic_obstacles_env,  make_single_dynamic_obstacles_env
-from envs.lunar_lander      import make_lunar_lander_env,       make_single_lunar_lander_env
+from envs.lunar_lander      import (make_lunar_lander_env,      make_single_lunar_lander_env,
+                                     make_lunar_lander_state_env, make_single_lunar_lander_state_env)
 from ppo.ppo                import PPO
 
 
@@ -75,17 +76,21 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander":
         vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
         single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
+    elif env_name == "lunar_lander_state":
+        vec_env    = make_lunar_lander_state_env(n_envs, seed)
+        single_env = make_single_lunar_lander_state_env(seed)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
     policy_kwargs = dict(
-        obs_shape    = get_obs_shape(vec_env),
-        n_actions    = vec_env.single_action_space.n,
-        task_types   = single_env.task_types,
-        num_classes  = single_env.num_classes,
-        concept_dim  = len(single_env.task_types),
-        features_dim = 512,
-        net_arch     = [64, 64],
+        obs_shape     = get_obs_shape(single_env),
+        n_actions     = vec_env.single_action_space.n,
+        task_types    = single_env.task_types,
+        num_classes   = single_env.num_classes,
+        concept_dim   = len(single_env.task_types),
+        concept_names = single_env.concept_names,
+        features_dim  = 512,
+        net_arch      = [64, 64],
     )
     return vec_env, single_env, policy_kwargs
 
@@ -108,6 +113,7 @@ def run_single(
     n_steps: int,
     batch_size: int,
     device: str,
+    out_dir: str,
     temporal_encoding: str = "none",
     training_mode: str = "two_phase",
 ) -> dict:
@@ -153,20 +159,25 @@ def run_single(
 
     mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)
 
-    # ---- Concept accuracy evaluation ----
-    concept_metrics = _evaluate_concepts(model, single_env)
+    # ---- Save model ----
+    model_path = os.path.join(out_dir, f"{method}_seed{seed}_model.pt")
+    torch.save(model.policy.state_dict(), model_path)
+
+    task_types      = single_env.task_types
+    concept_names   = single_env.concept_names
+    temporal_concs  = getattr(single_env, "temporal_concepts", [])
 
     vec_env.close()
     single_env.close()
 
     return {
-        "rewards":        np.array(model.episode_reward_history, dtype=np.float32),
-        "mean_reward":    mean_r,
-        "std_reward":     std_r,
-        "concept_metrics": concept_metrics,          # dict: name → accuracy/mse
-        "task_types":     single_env.task_types,
-        "concept_names":  single_env.concept_names,
-        "temporal_concepts": getattr(single_env, "temporal_concepts", []),
+        "rewards":           np.array(model.episode_reward_history, dtype=np.float32),
+        "mean_reward":       mean_r,
+        "std_reward":        std_r,
+        "concept_acc_log":   model.concept_acc_log,   # [(timestep, {name: metric})]
+        "task_types":        task_types,
+        "concept_names":     concept_names,
+        "temporal_concepts": temporal_concs,
     }
 
 
@@ -206,10 +217,23 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
         else:
             obs_t = obs_t.unsqueeze(0).to(model.device)
 
-        with torch.no_grad():
-            c_t, h_t = model.policy.predict_concepts(obs_t, h_t)
-
         truth = single_env.get_concept()
+
+        # Single forward pass: extract concepts and action together (avoids double GRU advance)
+        with torch.no_grad():
+            features = model.policy.extract_features(obs_t)
+            if model.method == "concept_actor_critic":
+                c_t, h_new, _, _ = model.policy.concept_net(features, h_t)
+                latent = model.policy.mlp_extractor(c_t)
+                action_logits = model.policy.action_net(latent)
+                action = action_logits.argmax(dim=1)
+                if h_new is not None:
+                    h_t = h_new
+            else:
+                c_t = model.policy.concept_net(features)
+                latent = model.policy.mlp_extractor(c_t)
+                action_logits = model.policy.action_net(latent)
+                action = action_logits.argmax(dim=1)
 
         if c_t is not None:
             c_np = c_t.cpu().numpy().flatten()
@@ -217,7 +241,6 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
                 all_preds[i].append(c_np[i])
                 all_truths[i].append(truth[i])
 
-        action, h_t = model.policy.predict(obs_t, h_t, deterministic=True)
         obs, _, done, trunc, _ = single_env.step(action.cpu().numpy().item())
         if done or trunc:
             obs, _ = single_env.reset()
@@ -286,19 +309,73 @@ def plot_learning_curves(
     print(f"[compare] saved → {path}")
 
 
-def plot_concept_accuracy(
+def plot_concept_accuracy_over_time(
+    results: Dict[str, Dict[int, dict]],
+    out_dir: str,
+    window: int = 5,
+) -> None:
+    """
+    Line plot of mean concept accuracy over training timesteps, one line per method.
+    Accuracy is averaged across all concepts (classification) / negated MSE (regression).
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plotted = False
+
+    for method in METHODS:
+        if method not in results or method == "no_concept":
+            continue
+        # Use first seed only (single-seed experiment)
+        seed_res = next(iter(results[method].values()))
+        log = seed_res.get("concept_acc_log", [])
+        if not log:
+            continue
+
+        task_types = seed_res["task_types"]
+        timesteps, mean_accs = [], []
+        for t, metrics in log:
+            accs = []
+            for name, tt in zip(seed_res["concept_names"], task_types):
+                v = metrics.get(name, np.nan)
+                # For regression, convert MSE to a [0,1] accuracy-like score
+                accs.append(v if tt == "classification" else np.exp(-v))
+            timesteps.append(t)
+            mean_accs.append(np.nanmean(accs))
+
+        timesteps  = np.array(timesteps)
+        mean_accs  = np.array(mean_accs)
+        smoothed   = smooth(mean_accs, window)
+
+        ax.plot(timesteps, smoothed, label=METHOD_LABELS[method],
+                color=METHOD_COLORS[method], linewidth=2)
+        plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        return
+
+    ax.set_xlabel("Timestep", fontsize=13)
+    ax.set_ylabel("Mean Concept Accuracy", fontsize=13)
+    ax.set_title("Concept Accuracy Over Training", fontsize=14)
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(out_dir, "concept_accuracy_over_time.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"[compare] saved → {path}")
+
+
+def plot_concept_accuracy_final(
     results: Dict[str, Dict[int, dict]],
     out_dir: str,
 ) -> None:
-    """Bar chart of per-concept accuracy, split by static vs temporal."""
-    # Collect concept names from first available result
-    concept_names = None
-    task_types    = None
-    temporal_idx  = []
+    """Bar chart of final per-concept accuracy for each method."""
+    concept_names, task_types, temporal_idx = None, None, []
     for method in METHODS:
         if method in results:
             for seed_res in results[method].values():
-                if seed_res.get("concept_metrics"):
+                if seed_res.get("concept_acc_log"):
                     concept_names = seed_res["concept_names"]
                     task_types    = seed_res["task_types"]
                     temporal_idx  = seed_res["temporal_concepts"]
@@ -307,51 +384,56 @@ def plot_concept_accuracy(
             break
 
     if not concept_names:
-        return  # no_concept only run
+        return
 
     n = len(concept_names)
-    concept_methods = [m for m in METHODS if m != "no_concept"]
+    concept_methods = [m for m in METHODS if m != "no_concept" and m in results]
+    if not concept_methods:
+        return
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    static_idx   = [i for i in range(n) if i not in temporal_idx]
+    static_idx    = [i for i in range(n) if i not in temporal_idx]
     temporal_idx_ = list(temporal_idx)
 
     for ax, indices, title in [
-        (axes[0], static_idx,   "Static Concepts"),
+        (axes[0], static_idx,    "Static Concepts"),
         (axes[1], temporal_idx_, "Temporal Concepts"),
     ]:
-        x    = np.arange(len(indices))
-        wid  = 0.35 if len(concept_methods) == 2 else 0.25
-        offsets = np.linspace(-(len(concept_methods)-1)*wid/2,
-                               (len(concept_methods)-1)*wid/2,
+        x   = np.arange(len(indices))
+        wid = 0.35 if len(concept_methods) == 2 else 0.25
+        offsets = np.linspace(-(len(concept_methods) - 1) * wid / 2,
+                               (len(concept_methods) - 1) * wid / 2,
                                len(concept_methods))
 
         for j, method in enumerate(concept_methods):
-            if method not in results:
+            # Use final accuracy from concept_acc_log
+            seed_res = next(iter(results[method].values()))
+            log = seed_res.get("concept_acc_log", [])
+            if not log:
                 continue
-            mean_metrics = []
+            final_metrics = log[-1][1]
+            bar_vals = []
             for ci in indices:
                 name = concept_names[ci]
-                vals = [
-                    v["concept_metrics"].get(name, np.nan)
-                    for v in results[method].values()
-                    if v.get("concept_metrics")
-                ]
-                mean_metrics.append(np.nanmean(vals) if vals else 0.0)
+                v = final_metrics.get(name, 0.0)
+                tt = task_types[ci]
+                bar_vals.append(v if tt == "classification" else np.exp(-v))
 
-            ax.bar(x + offsets[j], mean_metrics, wid,
+            ax.bar(x + offsets[j], bar_vals, wid,
                    label=METHOD_LABELS[method], color=METHOD_COLORS[method], alpha=0.8)
 
         ax.set_xticks(x)
-        ax.set_xticklabels([concept_names[i] for i in indices], rotation=30, ha="right", fontsize=9)
-        ax.set_ylabel("Accuracy (cls) / -MSE (reg)", fontsize=11)
+        ax.set_xticklabels([concept_names[i] for i in indices],
+                           rotation=30, ha="right", fontsize=9)
+        ax.set_ylabel("Accuracy (cls) / exp(-MSE) (reg)", fontsize=11)
         ax.set_title(title, fontsize=12)
         ax.legend(fontsize=9)
         ax.grid(True, axis="y", alpha=0.3)
+        ax.set_ylim(0, 1)
 
-    plt.suptitle("Concept Accuracy by Type", fontsize=14)
+    plt.suptitle("Final Concept Accuracy by Type", fontsize=14)
     plt.tight_layout()
-    path = os.path.join(out_dir, "concept_accuracy.png")
+    path = os.path.join(out_dir, "concept_accuracy_final.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"[compare] saved → {path}")
@@ -361,19 +443,19 @@ def write_summary_table(
     results: Dict[str, Dict[int, dict]],
     out_dir: str,
 ) -> None:
-    lines = ["=" * 60]
-    lines.append(f"{'Method':<30}  {'Mean Reward':>12}  {'Std Reward':>10}")
-    lines.append("-" * 60)
+    lines = ["=" * 55]
+    lines.append(f"{'Method':<30}  {'Eval Reward':>12}  {'Episodes':>9}")
+    lines.append("-" * 55)
 
     for method in METHODS:
         if method not in results:
             continue
-        seed_means = [v["mean_reward"] for v in results[method].values()]
-        m = np.mean(seed_means)
-        s = np.std(seed_means)
-        lines.append(f"{METHOD_LABELS[method]:<30}  {m:>12.2f}  {s:>10.2f}")
+        for seed, v in results[method].items():
+            m = v["mean_reward"]
+            n = len(v["rewards"])
+            lines.append(f"{METHOD_LABELS[method]:<30}  {m:>12.2f}  {n:>9}")
 
-    lines.append("=" * 60)
+    lines.append("=" * 55)
     table = "\n".join(lines)
     print("\n" + table)
 
@@ -390,7 +472,7 @@ def write_summary_table(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare three RL methods on a single environment.")
     parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander"])
+                        choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state"])
     parser.add_argument("--methods", nargs="+", default=METHODS,
                         choices=METHODS, help="Subset of methods to compare")
     parser.add_argument("--temporal_encoding", type=str, default="none",
@@ -399,7 +481,7 @@ def main() -> None:
     parser.add_argument("--training_mode", type=str, default="two_phase",
                         choices=["two_phase", "end_to_end"],
                         help="'two_phase': concept net frozen during PPO; 'end_to_end': joint training")
-    parser.add_argument("--seeds",   nargs="+", type=int, default=[42, 123, 456])
+    parser.add_argument("--seeds",   nargs="+", type=int, default=[42])
     parser.add_argument("--total_timesteps", type=int, default=500_000)
     parser.add_argument("--num_labels",      type=int, default=500)
     parser.add_argument("--query_num_times", type=int, default=2)
@@ -407,16 +489,20 @@ def main() -> None:
     parser.add_argument("--n_steps",         type=int, default=512)
     parser.add_argument("--batch_size",      type=int, default=256)
     parser.add_argument("--device",          type=str, default="auto")
-    parser.add_argument("--output_dir",      type=str, default="compare_results")
+    parser.add_argument("--output_dir",      type=str, default="/glade/derecho/scratch/adadelek/compare_results",
+                        help="Directory for heavy outputs (rollout .npy files, config)")
+    parser.add_argument("--plots_dir",       type=str, default="compare_plots",
+                        help="Directory for visualization outputs (.png, summary table)")
     args = parser.parse_args()
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(
-        args.output_dir,
-        f"{args.env}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
-    )
+    run_tag = f"{args.env}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
+    out_dir = os.path.join(args.output_dir, run_tag)
+    plots_dir = os.path.join(args.plots_dir, run_tag)
     os.makedirs(out_dir, exist_ok=True)
-    print(f"[compare] results → {out_dir}")
+    os.makedirs(plots_dir, exist_ok=True)
+    print(f"[compare] heavy results → {out_dir}")
+    print(f"[compare] plots        → {plots_dir}")
 
     # Save config
     with open(os.path.join(out_dir, "config.json"), "w") as f:
@@ -444,6 +530,7 @@ def main() -> None:
                     n_steps            = args.n_steps,
                     batch_size         = args.batch_size,
                     device             = args.device,
+                    out_dir            = out_dir,
                     temporal_encoding  = args.temporal_encoding,
                     training_mode      = args.training_mode,
                 )
@@ -453,7 +540,7 @@ def main() -> None:
                     f"[compare] done in {elapsed:.0f}s  "
                     f"mean_reward={res['mean_reward']:.2f} ± {res['std_reward']:.2f}"
                 )
-                # Save per-run rewards
+                # Save per-run rewards (heavy data → scratch)
                 np.save(
                     os.path.join(out_dir, f"{method}_seed{seed}_rewards.npy"),
                     res["rewards"],
@@ -466,13 +553,14 @@ def main() -> None:
                                           "concept_names": [], "task_types": [],
                                           "temporal_concepts": []}
 
-    # ---- Plots ----
+    # ---- Plots (saved locally) ----
     print("\n[compare] generating plots...")
-    plot_learning_curves(results, out_dir)
-    plot_concept_accuracy(results, out_dir)
-    write_summary_table(results, out_dir)
+    plot_learning_curves(results, plots_dir)
+    plot_concept_accuracy_over_time(results, plots_dir)
+    plot_concept_accuracy_final(results, plots_dir)
+    write_summary_table(results, plots_dir)
 
-    print(f"\n[compare] all done. Results in {out_dir}")
+    print(f"\n[compare] all done. Heavy data in {out_dir}, plots in {plots_dir}")
 
 
 if __name__ == "__main__":

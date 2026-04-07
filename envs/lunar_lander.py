@@ -62,12 +62,12 @@ class LunarLanderConceptEnv(gym.Wrapper):
         self.temporal_concepts = [2, 3, 5]
 
         self.frames = deque(maxlen=img_stack)
-        self._current_concept = np.zeros(N_CONCEPTS, dtype=np.float32)
+        self.current_concept = np.zeros(N_CONCEPTS, dtype=np.float32)
 
     # ------------------------------------------------------------------
 
     def get_concept(self) -> np.ndarray:
-        return self._current_concept.copy()
+        return self.current_concept.copy()
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -75,19 +75,19 @@ class LunarLanderConceptEnv(gym.Wrapper):
         frame = self._get_frame()
         for _ in range(self.img_stack):
             self.frames.append(frame)
-        self._current_concept = self._read_physics_state(obs)
-        info["concept"] = self._current_concept.copy()
+        self.current_concept = self._read_physics_state(obs)
+        info["concept"] = self.current_concept.copy()
         return self._stack_frames(), info
 
     def step(self, action):
         obs, reward, done, truncated, info = self.env.step(action)
         frame = self._get_frame()
         self.frames.append(frame)
-        self._current_concept = self._read_physics_state(obs)
+        self.current_concept = self._read_physics_state(obs)
         stacked = self._stack_frames()
         if done or truncated:
             info["terminal_observation"] = stacked
-        info["concept"] = self._current_concept.copy()
+        info["concept"] = self.current_concept.copy()
         return stacked, reward, done, truncated, info
 
     # ------------------------------------------------------------------
@@ -127,25 +127,164 @@ class LunarLanderConceptEnv(gym.Wrapper):
 
 
 # ---------------------------------------------------------------------------
+# State-based variant (no rendering — sanity check / ablation)
+# ---------------------------------------------------------------------------
+
+class LunarLanderStateEnv(gym.Wrapper):
+    """
+    LunarLander-v3 with raw 8-dim state observations and physics-based concepts.
+    No rendering — fast to run, used to verify PPO convergence before pixel training.
+    """
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32
+        )
+        self.task_types  = ["regression"] * 6 + ["classification"] * 2
+        self.num_classes = [0] * 6 + [2, 2]
+        self.concept_names = [
+            "x_position", "y_position",
+            "x_velocity", "y_velocity",
+            "angle", "angular_velocity",
+            "left_leg_contact", "right_leg_contact",
+        ]
+        self.temporal_concepts = [2, 3, 5]
+        self.current_concept = np.zeros(N_CONCEPTS, dtype=np.float32)
+
+    def get_concept(self) -> np.ndarray:
+        return self.current_concept.copy()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.current_concept = np.array(obs, dtype=np.float32)
+        info["concept"] = self.current_concept.copy()
+        return np.array(obs, dtype=np.float32), info
+
+    def step(self, action):
+        obs, reward, done, truncated, info = self.env.step(action)
+        self.current_concept = np.array(obs, dtype=np.float32)
+        info["concept"] = self.current_concept.copy()
+        return np.array(obs, dtype=np.float32), reward, done, truncated, info
+
+
+# ---------------------------------------------------------------------------
+# Position-only state variant (velocities hidden from observation)
+# ---------------------------------------------------------------------------
+
+class LunarLanderPosOnlyEnv(gym.Wrapper):
+    """
+    LunarLander with position-only observations — velocities are hidden.
+
+    Observation (5-dim): [x, y, angle, left_leg_contact, right_leg_contact]
+    Concepts    (8-dim): full physics state including velocities
+
+    This is the canonical showcase for the GRU variant: a single-step model
+    cannot predict velocity concepts from position alone, but a GRU can
+    integrate position history to infer them.
+    """
+
+    OBS_INDICES = [0, 1, 4, 6, 7]  # x, y, angle, left_contact, right_contact
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32
+        )
+        self.task_types  = ["regression"] * 6 + ["classification"] * 2
+        self.num_classes = [0] * 6 + [2, 2]
+        self.concept_names = [
+            "x_position", "y_position",
+            "x_velocity", "y_velocity",
+            "angle", "angular_velocity",
+            "left_leg_contact", "right_leg_contact",
+        ]
+        self.temporal_concepts = [2, 3, 5]
+        self.current_concept = np.zeros(N_CONCEPTS, dtype=np.float32)
+
+    def _pos_obs(self, full_obs: np.ndarray) -> np.ndarray:
+        return full_obs[self.OBS_INDICES].astype(np.float32)
+
+    def get_concept(self) -> np.ndarray:
+        return self.current_concept.copy()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.current_concept = np.array(obs, dtype=np.float32)
+        info["concept"] = self.current_concept.copy()
+        return self._pos_obs(obs), info
+
+    def step(self, action):
+        obs, reward, done, truncated, info = self.env.step(action)
+        self.current_concept = np.array(obs, dtype=np.float32)
+        info["concept"] = self.current_concept.copy()
+        return self._pos_obs(obs), reward, done, truncated, info
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 def make_lunar_lander_env(n_envs: int = 4, seed: int = 0, n_stack: int = 4) -> gym.Env:
-    from gymnasium.vector import SyncVectorEnv
+    from gymnasium.vector import AsyncVectorEnv
 
     def _make(rank: int):
         def _init():
-            env = gym.make("LunarLander-v2", render_mode="rgb_array")
+            env = gym.make("LunarLander-v3", render_mode="rgb_array")
             env = LunarLanderConceptEnv(env, img_stack=n_stack)
             env.reset(seed=seed + rank)
             return env
         return _init
 
-    return SyncVectorEnv([_make(i) for i in range(n_envs)])
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
 
 
 def make_single_lunar_lander_env(seed: int = 0, n_stack: int = 4) -> LunarLanderConceptEnv:
-    env = gym.make("LunarLander-v2", render_mode="rgb_array")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
     env = LunarLanderConceptEnv(env, img_stack=n_stack)
+    env.reset(seed=seed)
+    return env
+
+
+def make_lunar_lander_state_env(n_envs: int = 4, seed: int = 0, **_) -> gym.Env:
+    """Vectorised LunarLander with raw state observations (no rendering)."""
+    from gymnasium.vector import AsyncVectorEnv
+
+    def _make(rank: int):
+        def _init():
+            env = gym.make("LunarLander-v3")
+            env = LunarLanderStateEnv(env)
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_lunar_lander_state_env(seed: int = 0, **_) -> LunarLanderStateEnv:
+    env = gym.make("LunarLander-v3")
+    env = LunarLanderStateEnv(env)
+    env.reset(seed=seed)
+    return env
+
+
+def make_lunar_lander_pos_only_env(n_envs: int = 4, seed: int = 0, **_) -> gym.Env:
+    """Vectorised LunarLander with position-only observations (velocities hidden)."""
+    from gymnasium.vector import AsyncVectorEnv
+
+    def _make(rank: int):
+        def _init():
+            env = gym.make("LunarLander-v3")
+            env = LunarLanderPosOnlyEnv(env)
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_lunar_lander_pos_only_env(seed: int = 0, **_) -> LunarLanderPosOnlyEnv:
+    env = gym.make("LunarLander-v3")
+    env = LunarLanderPosOnlyEnv(env)
     env.reset(seed=seed)
     return env

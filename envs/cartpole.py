@@ -107,10 +107,10 @@ class VisionCartPoleEnv(gym.Wrapper):
 def make_cartpole_env(n_envs: int = 4, seed: int = 0, n_stack: int = 4) -> gym.Env:
     """
     Returns a vectorised VisionCartPoleEnv.
-    Uses gymnasium's SyncVectorEnv under the hood.
+    Uses gymnasium's AsyncVectorEnv for parallel env stepping.
     n_stack=1 disables frame stacking (single frame).
     """
-    from gymnasium.vector import SyncVectorEnv
+    from gymnasium.vector import AsyncVectorEnv
 
     def _make(rank: int):
         def _init():
@@ -120,8 +120,7 @@ def make_cartpole_env(n_envs: int = 4, seed: int = 0, n_stack: int = 4) -> gym.E
             return env
         return _init
 
-    vec_env = SyncVectorEnv([_make(i) for i in range(n_envs)])
-    return vec_env
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
 
 
 def make_single_cartpole_env(seed: int = 0, n_stack: int = 4) -> VisionCartPoleEnv:

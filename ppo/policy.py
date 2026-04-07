@@ -35,8 +35,13 @@ class NatureCNN(nn.Module):
     def __init__(self, obs_shape: tuple, features_dim: int = 512):
         super().__init__()
         n_input_channels = obs_shape[0]
+        # For small images (< 100px), use stride=2 in first layer to preserve
+        # fine spatial detail (e.g. LunarLander lander is ~12px at 84×84).
+        # For larger images (CartPole 160×240, DynamicObstacles 160×160) keep stride=4.
+        h = obs_shape[1] if len(obs_shape) > 1 else 84
+        first_stride = 2 if h < 100 else 4
         self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=first_stride, padding=0),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
             nn.ReLU(),
@@ -178,6 +183,32 @@ class ActorCriticPolicy(nn.Module):
         self.optimizer_exclude_concept = torch.optim.Adam(
             non_concept_params, lr=3e-4
         )
+
+        # optimizer_concept_only: concept_net parameters only
+        # Used by train_concept_actor_critic so the concept AC loss does not
+        # corrupt mlp_extractor / action_net / value_net.
+        if self.concept_net is not None:
+            self.optimizer_concept_only = torch.optim.Adam(
+                self.concept_net.parameters(), lr=3e-4
+            )
+        else:
+            self.optimizer_concept_only = None
+
+        # optimizer_concept_and_features: concept_net + features_extractor parameters
+        # Used by concept_actor_critic training so that concept signals shape the
+        # feature extractor (mirrors vanilla_freeze where concept supervision also
+        # flows through features_extractor), without touching mlp_extractor /
+        # action_net / value_net.
+        if self.concept_net is not None:
+            concept_and_feature_params = (
+                list(self.features_extractor.parameters()) +
+                list(self.concept_net.parameters())
+            )
+            self.optimizer_concept_and_features = torch.optim.Adam(
+                concept_and_feature_params, lr=3e-4
+            )
+        else:
+            self.optimizer_concept_and_features = None
 
     # ------------------------------------------------------------------
     # Feature extraction
@@ -324,7 +355,12 @@ class ActorCriticPolicy(nn.Module):
     # ------------------------------------------------------------------
 
     def update_lr(self, lr: float) -> None:
-        for opt in [self.optimizer, self.optimizer_exclude_concept]:
+        opts = [self.optimizer, self.optimizer_exclude_concept]
+        if self.optimizer_concept_only is not None:
+            opts.append(self.optimizer_concept_only)
+        if self.optimizer_concept_and_features is not None:
+            opts.append(self.optimizer_concept_and_features)
+        for opt in opts:
             for pg in opt.param_groups:
                 pg["lr"] = lr
 

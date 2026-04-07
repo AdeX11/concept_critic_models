@@ -1,18 +1,24 @@
 """
 dynamic_obstacles.py — DynamicObstaclesEnvWrapper from LICORICE.
 
-Uses concept_version=3 (11 concepts for 5x5 grid):
+Uses concept_version=3 (13 concepts for 5x5 grid):
   agent_position_x, agent_position_y, agent_direction,
   obstacle1_position_x, obstacle1_position_y,
   obstacle2_position_x, obstacle2_position_y,
-  movable_right, movable_down, movable_left, movable_up
+  movable_right, movable_down, movable_left, movable_up,
+  obstacle1_move_direction, obstacle2_move_direction
+
+obstacle move_direction encoding (5 classes):
+  0=stayed, 1=right, 2=down, 3=left, 4=up
 
 Observation: RGB image [3*n_stack, ROWS, COLS].
   n_stack=1 (default) → [3, ROWS, COLS]  (single frame, no stacking)
   n_stack=4           → [12, ROWS, COLS] (4-frame stack for stacked temporal encoding)
 
-Temporal concepts (move each step): indices 2 (direction), 6-10 (movable).
-Static concepts: positions (change rarely).
+Temporal concepts:
+  - obstacle1/2_move_direction: requires comparing two frames — invisible from single frame
+  - agent_direction, movable flags: change each step but visible from single frame
+Static concepts: positions (visible from single frame).
 """
 
 from collections import deque
@@ -43,6 +49,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
         COLS: int = 160,
         concept_version: int = 3,
         n_stack: int = 1,
+        grid_size: int = 8,
     ):
         super().__init__(env)
         assert _MINIGRID_AVAILABLE, "minigrid package required for DynamicObstaclesEnvWrapper"
@@ -50,6 +57,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
         self.COLS = COLS
         self.concept_version = concept_version
         self.n_stack = n_stack
+        self.grid_size = grid_size
 
         self.observation_space = gym.spaces.Box(
             low=0, high=255, shape=(3 * n_stack, ROWS, COLS), dtype=np.uint8
@@ -59,25 +67,37 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
         else:
             self._frames = None
 
-        # Only concept_version==3 supported here (11 concepts for 5x5)
+        # Only concept_version==3 supported here (13 concepts)
+        # Position classes scale with grid_size (coordinates 0..grid_size-1)
         assert concept_version == 3, "Only concept_version=3 supported in this wrapper"
-        self.task_types = ["classification"] * 11
-        self.num_classes = [6, 6, 4, 6, 6, 6, 6, 2, 2, 2, 2]
+        pos_classes = grid_size  # positions 0..grid_size-1
+        self.task_types = ["classification"] * 13
+        self.num_classes = [
+            pos_classes, pos_classes, 4,            # agent x, y, dir
+            pos_classes, pos_classes,               # obstacle1 x, y
+            pos_classes, pos_classes,               # obstacle2 x, y
+            2, 2, 2, 2,                             # movable r/d/l/u
+            5, 5,                                   # obstacle1/2 move direction
+        ]
         self.concept_names = [
             "agent_position_x", "agent_position_y", "agent_direction",
             "obstacle1_position_x", "obstacle1_position_y",
             "obstacle2_position_x", "obstacle2_position_y",
             "movable_right", "movable_down", "movable_left", "movable_up",
+            "obstacle1_move_direction", "obstacle2_move_direction",
         ]
-        # Temporal = direction + movable flags (change most steps)
-        self.temporal_concepts = [2, 7, 8, 9, 10]
+        # Truly temporal (invisible from single frame): obstacle move directions
+        # Also temporal but partially visible: direction, movable flags
+        self.temporal_concepts = [2, 7, 8, 9, 10, 11, 12]
 
-        self._current_concept: Optional[np.ndarray] = None
+        self.current_concept: Optional[np.ndarray] = None
+        self._prev_obstacle_positions: Optional[list] = None
+        self._current_obstacle_velocities: list = [(0, 0), (0, 0)]
 
     # ------------------------------------------------------------------
 
     def get_concept(self) -> np.ndarray:
-        return self._current_concept.copy() if self._current_concept is not None else np.zeros(11, dtype=np.float32)
+        return self.current_concept.copy() if self.current_concept is not None else np.zeros(11, dtype=np.float32)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -89,11 +109,16 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
             stacked = np.concatenate(list(self._frames), axis=0)
         else:
             stacked = frame
-        self._current_concept = self._compute_concept()
-        info["concept"] = self._current_concept.copy()
+        # Initialise velocity tracking — obstacles haven't moved yet
+        self._prev_obstacle_positions = self._get_obstacle_positions()
+        self._current_obstacle_velocities = [(0, 0), (0, 0)]
+        self.current_concept = self._compute_concept()
+        info["concept"] = self.current_concept.copy()
         return stacked, info
 
     def step(self, action):
+        # Record obstacle positions BEFORE the step
+        prev_positions = self._get_obstacle_positions()
         obs, reward, done, truncated, info = self.env.step(action)
         frame = self._get_image()
         if self.n_stack > 1:
@@ -101,13 +126,44 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
             stacked = np.concatenate(list(self._frames), axis=0)
         else:
             stacked = frame
-        self._current_concept = self._compute_concept()
+        # Compute obstacle velocities from position delta
+        curr_positions = self._get_obstacle_positions()
+        self._current_obstacle_velocities = [
+            (curr_positions[i][0] - prev_positions[i][0],
+             curr_positions[i][1] - prev_positions[i][1])
+            for i in range(2)
+        ]
+        self.current_concept = self._compute_concept()
         if done or truncated:
             info["terminal_observation"] = stacked
-        info["concept"] = self._current_concept.copy()
+        info["concept"] = self.current_concept.copy()
         return stacked, reward, done, truncated, info
 
     # ------------------------------------------------------------------
+
+    def _get_obstacle_positions(self) -> list:
+        """Returns sorted list of (x, y) for up to 2 obstacles, padded with (0,0)."""
+        unwrapped = self.env.unwrapped
+        grid = unwrapped.grid
+        positions = []
+        for x in range(grid.width):
+            for y in range(grid.height):
+                cell = grid.get(x, y)
+                if cell and cell.type == "ball":
+                    positions.append((x, y))
+        positions = sorted(positions)
+        while len(positions) < 2:
+            positions.append((0, 0))
+        return positions
+
+    @staticmethod
+    def _vel_to_direction(dx: int, dy: int) -> int:
+        """Map (dx, dy) delta to direction class: 0=stayed, 1=right, 2=down, 3=left, 4=up."""
+        if dx == 1:  return 1
+        if dy == 1:  return 2
+        if dx == -1: return 3
+        if dy == -1: return 4
+        return 0  # stayed or unexpected
 
     def _get_image(self) -> np.ndarray:
         img = self.env.render()
@@ -125,10 +181,6 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
                 return None
             return grid.get(x, y)
 
-        def is_movable(x, y):
-            cell = get_cell(x, y)
-            return cell is None or cell.type == "empty"
-
         def can_move(pos, direction):
             dx, dy = DIR_TO_VEC[direction]
             nx, ny = pos[0] + dx, pos[1] + dy
@@ -137,17 +189,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
                 return cell is None or (hasattr(cell, "can_overlap") and cell.can_overlap())
             return False
 
-        # Obstacle positions
-        obstacle_positions = []
-        for x in range(grid.width):
-            for y in range(grid.height):
-                cell = get_cell(x, y)
-                if cell and cell.type == "ball":
-                    obstacle_positions.append((x, y))
-        obstacle_positions = sorted(obstacle_positions)
-        # Pad to 2 obstacles
-        while len(obstacle_positions) < 2:
-            obstacle_positions.append((0, 0))
+        obstacle_positions = self._get_obstacle_positions()
 
         movable = [
             int(can_move(agent_pos, 0)),  # right
@@ -156,11 +198,17 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
             int(can_move(agent_pos, 3)),  # up
         ]
 
+        # Obstacle velocity directions (0=stayed,1=right,2=down,3=left,4=up)
+        obs_dirs = [
+            self._vel_to_direction(*self._current_obstacle_velocities[i])
+            for i in range(2)
+        ]
+
         values = [
             agent_pos[0], agent_pos[1], agent_dir,
             obstacle_positions[0][0], obstacle_positions[0][1],
             obstacle_positions[1][0], obstacle_positions[1][1],
-        ] + movable
+        ] + movable + obs_dirs
 
         return np.array(values, dtype=np.float32)
 
@@ -169,16 +217,15 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_dynamic_obstacles_env(n_envs: int = 4, seed: int = 0, n_stack: int = 1) -> gym.Env:
+def make_dynamic_obstacles_env(n_envs: int = 4, seed: int = 0, n_stack: int = 1, grid_size: int = 8) -> gym.Env:
     """
-    Returns a vectorised DynamicObstaclesEnvWrapper (5x5 grid, 2 obstacles).
+    Returns a vectorised DynamicObstaclesEnvWrapper (grid_size x grid_size, 2 obstacles).
     Requires minigrid and the CustomDynamicObstaclesEnv to be registered.
     """
-    from gymnasium.vector import SyncVectorEnv
+    from gymnasium.vector import AsyncVectorEnv
     from gymnasium.envs.registration import register
 
-    # Try to register custom env; fall back to standard if script not available
-    env_id = "MiniGrid-Custom-Dynamic-Obstacles-5x5-v0"
+    env_id = f"MiniGrid-Custom-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
     try:
         import sys, os
         scripts_dir = os.path.join(
@@ -190,30 +237,29 @@ def make_dynamic_obstacles_env(n_envs: int = 4, seed: int = 0, n_stack: int = 1)
             register(
                 id=env_id,
                 entry_point="custom_dynamic_obstacles_env:CustomDynamicObstaclesEnv",
-                kwargs={"size": 5, "n_obstacles": 2},
+                kwargs={"size": grid_size, "n_obstacles": 2},
             )
         except Exception:
             pass  # already registered
     except ImportError:
-        # Fall back to standard minigrid env
         import minigrid  # noqa: F401
-        env_id = "MiniGrid-Dynamic-Obstacles-5x5-v0"
+        env_id = f"MiniGrid-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
 
     def _make(rank: int):
         def _init():
             env = gym.make(env_id, render_mode="rgb_array", highlight=False)
-            env = DynamicObstaclesEnvWrapper(env, concept_version=3, n_stack=n_stack)
+            env = DynamicObstaclesEnvWrapper(env, concept_version=3, n_stack=n_stack, grid_size=grid_size)
             env.reset(seed=seed + rank)
             return env
         return _init
 
-    return SyncVectorEnv([_make(i) for i in range(n_envs)])
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
 
 
-def make_single_dynamic_obstacles_env(seed: int = 0, n_stack: int = 1) -> DynamicObstaclesEnvWrapper:
+def make_single_dynamic_obstacles_env(seed: int = 0, n_stack: int = 1, grid_size: int = 8) -> DynamicObstaclesEnvWrapper:
     from gymnasium.envs.registration import register
 
-    env_id = "MiniGrid-Custom-Dynamic-Obstacles-5x5-v0"
+    env_id = f"MiniGrid-Custom-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
     try:
         import sys, os
         scripts_dir = os.path.join(
@@ -225,14 +271,15 @@ def make_single_dynamic_obstacles_env(seed: int = 0, n_stack: int = 1) -> Dynami
             register(
                 id=env_id,
                 entry_point="custom_dynamic_obstacles_env:CustomDynamicObstaclesEnv",
-                kwargs={"size": 5, "n_obstacles": 2},
+                kwargs={"size": grid_size, "n_obstacles": 2},
             )
         except Exception:
             pass
     except ImportError:
-        env_id = "MiniGrid-Dynamic-Obstacles-5x5-v0"
+        import minigrid  # noqa: F401
+        env_id = f"MiniGrid-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
 
     env = gym.make(env_id, render_mode="rgb_array", highlight=False)
-    env = DynamicObstaclesEnvWrapper(env, concept_version=3, n_stack=n_stack)
+    env = DynamicObstaclesEnvWrapper(env, concept_version=3, n_stack=n_stack, grid_size=grid_size)
     env.reset(seed=seed)
     return env
