@@ -22,3 +22,9 @@ env/
 
 # OS
 .DS_Store
+
+# UV
+uv.lock
+main.py
+pyproject.toml
+.python-version
