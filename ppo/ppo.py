@@ -67,6 +67,7 @@ class PPO:
         # concept_actor_critic weights
         lambda_v: float = 0.5,        # concept critic loss weight
         lambda_s: float = 0.5,        # supervised anchor weight
+        concept_ac_epochs: Optional[int] = None,  # epochs for concept AC update; defaults to n_epochs
         # training settings
         training_mode: str = "two_phase",   # 'two_phase' | 'end_to_end'
         normalize_advantage: bool = True,
@@ -97,6 +98,7 @@ class PPO:
         self.learning_rate = learning_rate
         self.lambda_v = lambda_v
         self.lambda_s = lambda_s
+        self.concept_ac_epochs = concept_ac_epochs if concept_ac_epochs is not None else n_epochs
         self.normalize_advantage = normalize_advantage
         self.seed = seed
         self.verbose = verbose
@@ -505,7 +507,7 @@ class PPO:
 
         actor_losses, critic_losses, ent_losses = [], [], []
 
-        for _ in range(50):
+        for _ in range(self.concept_ac_epochs):
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs    = batch["observations"]
                 h_prev = batch["hidden_states"]
@@ -526,9 +528,19 @@ class PPO:
                 ac_loss2 = c_adv * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
                 actor_loss = -torch.min(ac_loss1, ac_loss2).mean()
 
-                # ---- Concept critic loss ----
+                # ---- Concept critic loss (PPO-style value clipping) ----
+                # Mirrors standard PPO: prevent V_c from jumping more than clip_range
+                # per update by taking the max of clipped and unclipped MSE losses.
                 c_ret = batch["concept_returns"]
-                critic_loss = F.mse_loss(V_c.flatten(), c_ret)
+                V_c_flat = V_c.flatten()
+                V_c_old  = batch["concept_values"]
+                V_c_clipped = V_c_old + torch.clamp(
+                    V_c_flat - V_c_old, -self.clip_range, self.clip_range
+                )
+                critic_loss = torch.max(
+                    F.mse_loss(V_c_flat,    c_ret),
+                    F.mse_loss(V_c_clipped, c_ret),
+                ).mean()
 
                 # ---- Concept actor entropy (mirrors ent_coef * ent_loss in train_policy) ----
                 concept_ent_loss = -torch.stack(

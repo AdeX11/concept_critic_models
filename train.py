@@ -30,6 +30,7 @@ from envs.lunar_lander    import (make_lunar_lander_env,           make_single_l
                                    make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
                                    make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
 from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
+from envs.hidden_velocity import  make_hidden_velocity_env,          make_single_hidden_velocity_env
 from ppo.ppo              import PPO
 
 
@@ -76,8 +77,14 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "mountain_car":
         vec_env    = make_mountain_car_env(n_envs, seed)
         single_env = make_single_mountain_car_env(seed)
+    elif env_name == "hidden_velocity":
+        vec_env    = make_hidden_velocity_env(n_envs, seed)
+        single_env = make_single_hidden_velocity_env(seed)
     else:
         raise ValueError(f"Unknown env: {env_name}")
+
+    # hidden_velocity has a low-dim obs — use a smaller feature extractor
+    features_dim = 128 if env_name == "hidden_velocity" else 512
 
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
@@ -86,7 +93,7 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
         num_classes   = single_env.num_classes,
         concept_dim   = len(single_env.task_types),
         concept_names = single_env.concept_names,
-        features_dim  = 512,
+        features_dim  = features_dim,
         net_arch      = [64, 64],
     )
     return vec_env, single_env, policy_kwargs
@@ -103,7 +110,7 @@ def main() -> None:
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
-                                 "mountain_car"])
+                                 "mountain_car", "hidden_velocity"])
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "

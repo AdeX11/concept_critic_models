@@ -1,3 +1,4 @@
 from .cartpole import make_cartpole_env, VisionCartPoleEnv
 from .dynamic_obstacles import make_dynamic_obstacles_env, DynamicObstaclesEnvWrapper
 from .lunar_lander import make_lunar_lander_env, LunarLanderConceptEnv
+from .hidden_velocity import make_hidden_velocity_env, make_single_hidden_velocity_env, HiddenVelocityEnv

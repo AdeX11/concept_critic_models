@@ -463,7 +463,8 @@ def main() -> None:
     )
     parser.add_argument("--env", required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only", "mountain_car"])
+                                 "lunar_lander_state", "lunar_lander_pos_only",
+                                 "mountain_car", "hidden_velocity"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
     parser.add_argument("--results_dir",  type=str, default="/glade/derecho/scratch/adadelek/results",
                         help="Directory containing completed run subdirectories")
