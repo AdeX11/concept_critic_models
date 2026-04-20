@@ -33,6 +33,10 @@ from envs.cartpole          import make_cartpole_env,           make_single_cart
 from envs.dynamic_obstacles import make_dynamic_obstacles_env,  make_single_dynamic_obstacles_env
 from envs.lunar_lander      import (make_lunar_lander_env,      make_single_lunar_lander_env,
                                      make_lunar_lander_state_env, make_single_lunar_lander_state_env)
+from envs.pick_place        import (make_panda_pickplace_env, make_single_panda_env,
+                                     make_panda_pickplace_state_env, make_single_panda_pickplace_state_env,
+                                     )
+from envs.highway import make_highway_env, make_single_highway_env
 from ppo.ppo                import PPO
 
 
@@ -66,7 +70,8 @@ def get_obs_shape(env):
     return obs_space.shape
 
 
-def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 1):
+def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 1,
+                               max_force: float = None, env_seed: int = None):
     if env_name == "cartpole":
         vec_env    = make_cartpole_env(n_envs, seed, n_stack=n_stack)
         single_env = make_single_cartpole_env(seed, n_stack=n_stack)
@@ -79,6 +84,20 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander_state":
         vec_env    = make_lunar_lander_state_env(n_envs, seed)
         single_env = make_single_lunar_lander_state_env(seed)
+    elif env_name in ("pick_place", "panda_pickplace"):
+        # Panda-based pick-and-place (panda_gym wrapper)
+        e_seed = seed if env_seed is None else env_seed
+        mf = max_force if max_force is not None else 50.0
+        vec_env    = make_panda_pickplace_env(n_envs, e_seed, max_force=mf)
+        single_env = make_single_panda_env(e_seed, max_force=mf)
+    elif env_name == "panda_pickplace_state":
+        e_seed = seed if env_seed is None else env_seed
+        mf = max_force if max_force is not None else 50.0
+        vec_env    = make_panda_pickplace_state_env(n_envs, e_seed, max_force=mf)
+        single_env = make_single_panda_pickplace_state_env(e_seed, max_force=mf)
+    elif env_name == "highway":
+        vec_env    = make_highway_env(n_envs, seed, n_stack=n_stack)
+        single_env = make_single_highway_env(seed, n_stack=n_stack)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
@@ -116,12 +135,14 @@ def run_single(
     out_dir: str,
     temporal_encoding: str = "none",
     training_mode: str = "two_phase",
+    max_force: float = None,
+    env_seed: int = None,
 ) -> dict:
     """Train one method/seed and return metrics dict."""
     set_seed(seed)
     n_stack = 4 if temporal_encoding == "stacked" else 1
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
-        env_name, n_envs, seed, n_stack=n_stack
+        env_name, n_envs, seed, n_stack=n_stack, max_force=max_force, env_seed=env_seed
     )
     dev = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     policy_kwargs["device"] = dev
@@ -472,7 +493,10 @@ def write_summary_table(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare three RL methods on a single environment.")
     parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state"])
+                        choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state",
+                                 "pick_place", "pick_place_state", "panda_pickplace", "panda_pickplace_state"])
+    parser.add_argument("--state", action="store_true",
+                        help="(pick_place) use state-only variant (no rendering / images)")
     parser.add_argument("--methods", nargs="+", default=METHODS,
                         choices=METHODS, help="Subset of methods to compare")
     parser.add_argument("--temporal_encoding", type=str, default="none",
@@ -489,14 +513,18 @@ def main() -> None:
     parser.add_argument("--n_steps",         type=int, default=512)
     parser.add_argument("--batch_size",      type=int, default=256)
     parser.add_argument("--device",          type=str, default="auto")
-    parser.add_argument("--output_dir",      type=str, default="/glade/derecho/scratch/adadelek/compare_results",
+    parser.add_argument("--output_dir",      type=str, default="./compare_results",
                         help="Directory for heavy outputs (rollout .npy files, config)")
-    parser.add_argument("--plots_dir",       type=str, default="compare_plots",
+    parser.add_argument("--plots_dir",       type=str, default="./plots",
                         help="Directory for visualization outputs (.png, summary table)")
+    parser.add_argument("--max-force", type=float, default=None, help="(pick_place) max force threshold used during env creation")
+    parser.add_argument("--env-seed", type=int, default=None)
     args = parser.parse_args()
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_tag = f"{args.env}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
+    # Use an env label that includes _state when requested so output dirs match train.py
+    env_tag = args.env + ("_state" if getattr(args, "state", False) and args.env == "pick_place" else "")
+    run_tag = f"{env_tag}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
     out_dir = os.path.join(args.output_dir, run_tag)
     plots_dir = os.path.join(args.plots_dir, run_tag)
     os.makedirs(out_dir, exist_ok=True)
@@ -519,9 +547,14 @@ def main() -> None:
             print(f"{'='*60}")
             t0 = time.time()
             try:
+                # Map pick_place + --state into the internal panda_pickplace variants
+                env_name = args.env
+                if args.env == "pick_place":
+                    env_name = "panda_pickplace_state" if getattr(args, "state", False) else "panda_pickplace"
+
                 res = run_single(
                     method             = method,
-                    env_name           = args.env,
+                    env_name           = env_name,
                     seed               = seed,
                     total_timesteps    = args.total_timesteps,
                     num_labels         = args.num_labels,
@@ -533,6 +566,8 @@ def main() -> None:
                     out_dir            = out_dir,
                     temporal_encoding  = args.temporal_encoding,
                     training_mode      = args.training_mode,
+                    max_force          = args.max_force,
+                    env_seed           = args.env_seed,
                 )
                 results[method][seed] = res
                 elapsed = time.time() - t0

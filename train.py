@@ -30,6 +30,13 @@ from envs.lunar_lander    import (make_lunar_lander_env,           make_single_l
                                    make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
                                    make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
 from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
+from envs.pick_place import (
+    make_panda_pickplace_env,
+    make_single_panda_env,
+    make_panda_pickplace_state_env,
+    make_single_panda_pickplace_state_env,
+)
+from envs.highway        import make_single_highway_env, make_single_highway_state_env, make_highway_env, make_highway_state_env
 from ppo.ppo              import PPO
 
 
@@ -76,6 +83,19 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "mountain_car":
         vec_env    = make_mountain_car_env(n_envs, seed)
         single_env = make_single_mountain_car_env(seed)
+    elif env_name in ("pick_place", "panda_pickplace"):
+        # Panda-gym PickPlace environment (PyBullet backend)
+        vec_env    = make_panda_pickplace_env(n_envs, seed)
+        single_env = make_single_panda_env(seed)
+    elif env_name == "panda_pickplace_state":
+        vec_env    = make_panda_pickplace_state_env(n_envs, seed)
+        single_env = make_single_panda_pickplace_state_env(seed)
+    elif env_name == "highway":
+        vec_env    = make_highway_env(n_envs, seed)  # No official VecEnv version, so just use single env
+        single_env = make_single_highway_env(seed)
+    elif env_name == "highway_state":
+        vec_env    = make_highway_state_env(n_envs, seed)  # No official VecEnv version, so just use single env
+        single_env = make_single_highway_state_env(seed)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
@@ -103,7 +123,9 @@ def main() -> None:
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
-                                 "mountain_car"])
+                                 "mountain_car", "pick_place", "highway"])
+    parser.add_argument("--state", action="store_true",
+                        help=" use state-only variant (no rendering / images)")
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "
@@ -131,14 +153,18 @@ def main() -> None:
     parser.add_argument("--lambda_s",          type=float, default=0.5,
                         help="Supervised anchor loss weight (concept_actor_critic only)")
     parser.add_argument("--device",            type=str,   default="auto")
-    parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
+    parser.add_argument("--output_dir",        type=str,   default="./results")
+    parser.add_argument("--no-save", action="store_true",
+                        help="If set, skip saving heavy artifacts (model weights, concept logs). Useful for dry-runs.")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
+    # Tag the run with an env label that encodes whether we're using the state-only variant
+    env_tag = args.env + ("_state" if args.state and (args.env == "pick_place" or args.env == "highway") else "")
     out_dir = os.path.join(
         args.output_dir,
-        f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{args.env}_seed{args.seed}"
+        f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{env_tag}_seed{args.seed}"
     )
     os.makedirs(out_dir, exist_ok=True)
     print(f"[train] method={args.method}  training_mode={args.training_mode}  "
@@ -149,8 +175,16 @@ def main() -> None:
     n_stack = 4 if args.temporal_encoding == "stacked" else 1
 
     # ---- Environment ----
+    # Map external CLI env + --state flag to internal factory names
+    effective_env = args.env
+    if args.env == "pick_place":
+        effective_env = "panda_pickplace_state" if args.state else "panda_pickplace"
+
+    if args.env == "highway":
+        effective_env = "highway_state" if args.state else "highway"
+
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
-        args.env, args.n_envs, args.seed, n_stack=n_stack
+        effective_env, args.n_envs, args.seed, n_stack=n_stack
     )
     policy_kwargs["device"] = args.device if args.device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -194,18 +228,22 @@ def main() -> None:
     np.save(rewards_path, np.array(model.episode_reward_history, dtype=np.float32))
     print(f"[train] saved episode rewards → {rewards_path}")
 
-    model_path = os.path.join(out_dir, "model.pt")
-    torch.save(model.policy.state_dict(), model_path)
-    print(f"[train] saved model → {model_path}")
+    # Optionally skip saving heavy artifacts during dry-runs
+    if not args.no_save:
+        model_path = os.path.join(out_dir, "model.pt")
+        torch.save(model.policy.state_dict(), model_path)
+        print(f"[train] saved model → {model_path}")
 
-    if model.concept_acc_log:
-        timesteps = np.array([t for t, _ in model.concept_acc_log], dtype=np.int64)
-        names     = list(model.concept_acc_log[0][1].keys())
-        values    = np.array([[d[n] for n in names]
-                               for _, d in model.concept_acc_log], dtype=np.float32)
-        np.savez(os.path.join(out_dir, "concept_acc.npz"),
-                 timesteps=timesteps, names=np.array(names), values=values)
-        print(f"[train] saved concept accuracy log → {out_dir}/concept_acc.npz")
+        if model.concept_acc_log:
+            timesteps = np.array([t for t, _ in model.concept_acc_log], dtype=np.int64)
+            names     = list(model.concept_acc_log[0][1].keys())
+            values    = np.array([[d[n] for n in names]
+                                   for _, d in model.concept_acc_log], dtype=np.float32)
+            np.savez(os.path.join(out_dir, "concept_acc.npz"),
+                     timesteps=timesteps, names=np.array(names), values=values)
+            print(f"[train] saved concept accuracy log → {out_dir}/concept_acc.npz")
+    else:
+        print("[train] --no-save set: skipping model and concept_acc saves")
 
     # ---- Quick evaluation ----
     mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)

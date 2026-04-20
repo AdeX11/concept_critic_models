@@ -74,6 +74,9 @@ def discover_runs(results_dir: str, env: str, methods: List[str]) -> Dict:
     """
     runs: Dict = {}
 
+    # Convert to absolute path immediately
+    results_dir = os.path.abspath(results_dir)
+
     if not os.path.isdir(results_dir):
         print(f"[plot] results_dir not found: {results_dir}")
         return runs
@@ -236,16 +239,12 @@ def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
     plt.close(fig)
     print(f"[plot] saved → {path}")
 
-
 def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
     """
-    Plot concept prediction quality vs timestep, split into two subplots:
-      - Static concepts  (position, angle, leg contact)
-      - Temporal concepts (velocity terms — where GRU should help)
-
-    Metric: MSE for regression (lower = better), accuracy for classification (higher = better).
+    Plot concept prediction quality vs timestep, split into a 2x2 grid:
+      - Rows: Static vs. Temporal
+      - Cols: Classification (Accuracy) vs. Regression (MSE)
     """
-    # Identify temporal concept indices from names (velocity terms)
     concept_names_ref = None
     for method in METHODS:
         if method not in runs or method == "no_concept":
@@ -257,28 +256,41 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
                     if ca and len(ca["names"]) > 0:
                         concept_names_ref = ca["names"]
                         break
-                if concept_names_ref:
-                    break
-            if concept_names_ref:
-                break
-        if concept_names_ref:
-            break
+                if concept_names_ref: break
+            if concept_names_ref: break
+        if concept_names_ref: break
 
     if concept_names_ref is None:
         print("[plot] no concept accuracy data to plot")
         return
 
-    temporal_keywords = ("velocity", "move_direction", "vel_", "direction")
-    temporal_idx = [
-        i for i, n in enumerate(concept_names_ref)
-        if any(kw in n.lower() for kw in temporal_keywords)
-    ]
-    static_idx = [i for i in range(len(concept_names_ref)) if i not in temporal_idx]
+    temporal_keywords = (
+        "velocity", "move_direction", "vel_", "direction", 
+        "crush", "broken", "_aggress", "accel"
+    )
+    
+    classification_keywords = (
+        "contact", "broken", "is_broken", "grasp", "_lane"
+    )
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
-    ax_static, ax_temporal = axes
+    # Categorize indices
+    cats = {"stat_class": [], "stat_reg": [], "temp_class": [], "temp_reg": []}
+    for i, name in enumerate(concept_names_ref):
+        is_temp = any(kw in name.lower() for kw in temporal_keywords)
+        is_class = any(kw in name.lower() for kw in classification_keywords)
+        
+        if is_temp and is_class: cats["temp_class"].append(i)
+        elif is_temp and not is_class: cats["temp_reg"].append(i)
+        elif not is_temp and is_class: cats["stat_class"].append(i)
+        else: cats["stat_reg"].append(i)
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    ax_map = {
+        "stat_class": axes[0, 0], "stat_reg": axes[0, 1],
+        "temp_class": axes[1, 0], "temp_reg": axes[1, 1]
+    }
+
     plotted = False
-
     for method in METHODS:
         if method not in runs or method == "no_concept":
             continue
@@ -290,9 +302,8 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
                     ca = v.get("concept_acc")
                     if ca is None or len(ca["timesteps"]) == 0:
                         continue
-                    if all_ts is None:
-                        all_ts = ca["timesteps"]
-                    all_vals.append(ca["values"])   # [N_checkpoints, concept_dim]
+                    if all_ts is None: all_ts = ca["timesteps"]
+                    all_vals.append(ca["values"])
 
                 if not all_vals or all_ts is None:
                     continue
@@ -300,19 +311,16 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
                 label = _run_label(method, training_mode, temporal_encoding)
                 color = _run_color(method, training_mode, temporal_encoding)
                 min_len = min(len(v) for v in all_vals)
-                arr = np.stack([v[:min_len] for v in all_vals])  # [seeds, N, concept_dim]
-                mean_vals = arr.mean(axis=0)  # [N, concept_dim]
+                arr = np.stack([v[:min_len] for v in all_vals])
+                mean_vals = arr.mean(axis=0)
                 ts_plot = all_ts[:min_len]
                 markevery = max(1, len(ts_plot) // 10)
 
-                static_mean   = mean_vals[:, static_idx].mean(axis=1)
-                temporal_mean = mean_vals[:, temporal_idx].mean(axis=1) if temporal_idx else None
-
-                ax_static.plot(ts_plot, static_mean, label=label, color=color,
-                               linewidth=1.8, marker="o", markersize=4, markevery=markevery)
-                if temporal_mean is not None:
-                    ax_temporal.plot(ts_plot, temporal_mean, label=label, color=color,
-                                     linewidth=1.8, marker="o", markersize=4, markevery=markevery)
+                for cat_name, idxs in cats.items():
+                    if not idxs: continue
+                    cat_mean = mean_vals[:, idxs].mean(axis=1)
+                    ax_map[cat_name].plot(ts_plot, cat_mean, label=label, color=color,
+                                          linewidth=1.8, marker="o", markersize=4, markevery=markevery)
                 plotted = True
 
     if not plotted:
@@ -320,22 +328,29 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
         plt.close(fig)
         return
 
-    static_names   = [concept_names_ref[i] for i in static_idx]
-    temporal_names = [concept_names_ref[i] for i in temporal_idx]
+    # Formatting axes
+    titles = {
+        "stat_class": ("Static Classification", "Accuracy (↑ better)"),
+        "stat_reg":   ("Static Regression", "MSE (↓ better)"),
+        "temp_class": ("Temporal Classification", "Accuracy (↑ better)"),
+        "temp_reg":   ("Temporal Regression", "MSE (↓ better)")
+    }
 
-    ax_static.set_title(f"Static Concepts\n({', '.join(static_names)})", fontsize=11)
-    ax_static.set_xlabel("Timestep", fontsize=11)
-    ax_static.set_ylabel("MSE (↓ better)  /  classification acc (↑ better)", fontsize=10)
-    ax_static.legend(fontsize=9)
-    ax_static.grid(True, alpha=0.3)
+    for cat_name, ax in ax_map.items():
+        idxs = cats[cat_name]
+        if not idxs:
+            ax.set_visible(False)
+            continue
+        names = [concept_names_ref[i] for i in idxs]
+        title, ylabel = titles[cat_name]
+        
+        ax.set_title(f"{title}\n({', '.join(names)})", fontsize=11)
+        ax.set_xlabel("Timestep", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
 
-    ax_temporal.set_title(f"Temporal Concepts\n({', '.join(temporal_names)})", fontsize=11)
-    ax_temporal.set_xlabel("Timestep", fontsize=11)
-    ax_temporal.set_ylabel("MSE (↓ better)", fontsize=10)
-    ax_temporal.legend(fontsize=9)
-    ax_temporal.grid(True, alpha=0.3)
-
-    fig.suptitle("Concept Accuracy Over Training", fontsize=13, y=1.01)
+    fig.suptitle("Concept Accuracy Over Training", fontsize=14, y=1.02)
     plt.tight_layout()
 
     path = os.path.join(out_dir, "concept_accuracy_over_time.png")
@@ -348,6 +363,7 @@ def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
     """
     Final concept accuracy bar chart, one bar per concept, grouped by method.
     Uses the last checkpoint in concept_acc.npz.
+    Sorts the bars so Classification concepts and Regression concepts are grouped together.
     """
     # Collect final values for each method/variant
     method_labels = []
@@ -376,23 +392,58 @@ def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
         print("[plot] no concept accuracy data for per-concept bar chart")
         return
 
-    n_concepts = len(concept_names)
+    # --- NEW SORTING LOGIC ---
+    # Use the fixed keyword list to identify classification tasks
+    classification_keywords = ("contact", "broken", "is_broken", "grasp", "_lane")
+    
+    class_idxs = []
+    reg_idxs = []
+    
+    for i, name in enumerate(concept_names):
+        if any(kw in name.lower() for kw in classification_keywords):
+            class_idxs.append(i)
+        else:
+            reg_idxs.append(i)
+            
+    # Create the new sorted order (Classification first, then Regression)
+    sorted_idxs = class_idxs + reg_idxs
+    sorted_concept_names = [concept_names[i] for i in sorted_idxs]
+    # -------------------------
+
+    n_concepts = len(sorted_concept_names)
     n_methods  = len(method_labels)
     x = np.arange(n_concepts)
     width = 0.8 / n_methods
 
     fig, ax = plt.subplots(figsize=(max(12, n_concepts * 1.5), 6))
+    
     for i, label in enumerate(method_labels):
-        vals = method_final[label]
+        # Grab the values and sort them to match the new axis order
+        vals = method_final[label][sorted_idxs] 
         offset = (i - n_methods / 2 + 0.5) * width
         ax.bar(x + offset, vals, width, label=label, alpha=0.8)
 
+    # Add a vertical divider if both types of concepts are present
+    if len(class_idxs) > 0 and len(reg_idxs) > 0:
+        divider_x = len(class_idxs) - 0.5
+        ax.axvline(x=divider_x, color='black', linestyle='--', alpha=0.6, linewidth=2)
+        
+        # Add text labels at the top to make the grouping clear
+        ylim = ax.get_ylim()[1]
+        ax.text(divider_x / 2 - 0.5, ylim * 0.95, 'Classification (Acc ↑)', 
+                ha='center', fontsize=12, fontweight='bold', alpha=0.7)
+        ax.text(divider_x + len(reg_idxs) / 2 + 0.5, ylim * 0.95, 'Regression (MSE ↓)', 
+                ha='center', fontsize=12, fontweight='bold', alpha=0.7)
+
     ax.set_xlabel("Concept", fontsize=12)
     ax.set_ylabel("MSE (↓ better)  /  classification acc (↑ better)", fontsize=12)
-    ax.set_title("Final Per-Concept Concept Prediction", fontsize=14)
+    ax.set_title("Final Per-Concept Prediction Accuracy", fontsize=14)
     ax.set_xticks(x)
-    ax.set_xticklabels(concept_names, rotation=30, ha="right", fontsize=9)
-    ax.legend(fontsize=10)
+    ax.set_xticklabels(sorted_concept_names, rotation=30, ha="right", fontsize=9)
+    
+    # Place legend outside the plot so it doesn't overlap the bars
+    ax.legend(fontsize=10, loc='upper left', bbox_to_anchor=(1, 1))
+    
     ax.grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
 
@@ -463,18 +514,27 @@ def main() -> None:
     )
     parser.add_argument("--env", required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only", "mountain_car"])
+                                 "lunar_lander_state", "lunar_lander_pos_only", "mountain_car",
+                                 "pick_place", "pick_place_state", "panda_pickplace", "panda_pickplace_state", "highway", "highway_state"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
-    parser.add_argument("--results_dir",  type=str, default="/glade/derecho/scratch/adadelek/results",
+    parser.add_argument("--results_dir",  type=str, default="./results",
                         help="Directory containing completed run subdirectories")
-    parser.add_argument("--output_dir",   type=str, default="plots",
+    parser.add_argument("--output_dir",   type=str, default="./plots",
                         help="Where to save plots and summary (kept local)")
     parser.add_argument("--smooth_window", type=int, default=30)
+    # Options borrowed from envs/pick_place smoke test (accepted but optional for filtering)
+    parser.add_argument("--render", action="store_true", help="(pick_place) include rendering variants")
+    parser.add_argument("--state", action="store_true", help="(pick_place) include state-only variants")
+    parser.add_argument("--max-force", type=float, default=None, help="(pick_place) max force threshold used during training")
+    parser.add_argument("--seed", type=int, default=None, help="(pick_place) seed used during training")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    runs = discover_runs(args.results_dir, args.env, args.methods)
+    # Match train.py/compare.py naming: when --state is passed for pick_place look for pick_place_state
+    env_search = args.env + ("_state" if getattr(args, "state", False) and args.env == "pick_place" else "")
+    env_search = args.env + ("_state" if getattr(args, "state", False) and args.env == "highway" else "") if env_search == "highway" else env_search
+    runs = discover_runs(args.results_dir, env_search, args.methods)
 
     if not runs:
         print(f"[plot] no completed runs found for env={args.env} in {args.results_dir}")

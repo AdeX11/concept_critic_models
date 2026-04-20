@@ -44,6 +44,9 @@ class FlexibleMultiTaskNetwork(nn.Module):
         feature_dim: int,
         task_types: List[str],
         num_classes: List[int],
+        # ---> [CHANGE 1]: Added **kwargs to safely absorb temporal_concepts 
+        #                  passed down from ActorCriticPolicy without crashing.
+        **kwargs
     ):
         super().__init__()
         self.task_types = task_types
@@ -158,6 +161,8 @@ class ConceptActorCritic(nn.Module):
         task_types: List[str],
         num_classes: List[int],
         temporal_encoding: str = "gru",
+        # ---> [CHANGE 2a]: Catch temporal_concepts to separate the architecture
+        temporal_concepts: Optional[List[int]] = None,
     ):
         super().__init__()
         assert temporal_encoding in ("gru", "stacked", "none"), (
@@ -167,52 +172,55 @@ class ConceptActorCritic(nn.Module):
         self.num_classes = num_classes
         self.n_concepts = len(task_types)
         self.temporal_encoding = temporal_encoding
+        
+        # ---> [CHANGE 2b]: Store the list safely
+        self.temporal_concepts = temporal_concepts if temporal_concepts is not None else []
 
         if temporal_encoding == "gru":
             self.hidden_dim = self.HIDDEN_DIM
             self.gru = nn.GRUCell(feature_dim, self.hidden_dim)
-            head_input_dim = self.hidden_dim
+            critic_input_dim = self.hidden_dim
         else:
             # 'stacked' or 'none': heads read CNN features directly, no GRU
             self.hidden_dim = feature_dim
             self.gru = None
-            head_input_dim = feature_dim
+            critic_input_dim = feature_dim
 
         # Actor heads — one per concept
         self.actor_heads = nn.ModuleList()
-        for task_type, n_cls in zip(task_types, num_classes):
+        for idx, (task_type, n_cls) in enumerate(zip(task_types, num_classes)):
+            
+            # ---> [CHANGE 2c]: Dynamically set input dimensions based on the concept type
+            is_temporal = (self.temporal_encoding == "gru" and idx in self.temporal_concepts)
+            in_dim = self.hidden_dim if is_temporal else feature_dim
+            
             if task_type == "classification":
-                self.actor_heads.append(nn.Linear(head_input_dim, n_cls))
+                self.actor_heads.append(nn.Linear(in_dim, n_cls))
             else:  # regression — mu + log_std
                 head = nn.ModuleDict({
-                    "mu":      nn.Linear(head_input_dim, 1),
-                    "log_std": nn.Linear(head_input_dim, 1),
+                    "mu":      nn.Linear(in_dim, 1),
+                    "log_std": nn.Linear(in_dim, 1),
                 })
                 self.actor_heads.append(head)
 
         # Concept critic head
-        self.critic_head = nn.Linear(head_input_dim, 1)
+        self.critic_head = nn.Linear(critic_input_dim, 1)
 
     # ------------------------------------------------------------------
 
-    def _get_head_input(
+    # ---> [CHANGE 3]: Simplified GRU step function to just handle memory state
+    def _step_gru(
         self,
         features: torch.Tensor,
         h_prev: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Returns (head_input, h_new).
-        For 'gru': runs GRUCell, returns (h_t, h_t).
-        For 'stacked'/'none': returns (features, None).
-        """
+    ) -> Optional[torch.Tensor]:
+        """Steps the GRU and returns the new hidden state, or None."""
         if self.temporal_encoding == "gru":
             B = features.size(0)
             if h_prev is None:
                 h_prev = torch.zeros(B, self.hidden_dim, device=features.device)
-            h_t = self.gru(features, h_prev)
-            return h_t, h_t
-        else:
-            return features, None
+            return self.gru(features, h_prev)
+        return None
 
     # ------------------------------------------------------------------
 
@@ -230,13 +238,21 @@ class ConceptActorCritic(nn.Module):
           concept_dists: list[Distribution]
           V_c:           [B, 1]
         """
-        head_input, h_t = self._get_head_input(features, h_prev)
-        V_c = self.critic_head(head_input)  # [B, 1]
+        # ---> [CHANGE 4a]: Step GRU and assign correct critic input
+        h_t = self._step_gru(features, h_prev)
+        critic_input = h_t if self.temporal_encoding == "gru" else features
+        V_c = self.critic_head(critic_input)  # [B, 1]
 
         c_t_list = []
         concept_dists = []
 
-        for head, task_type in zip(self.actor_heads, self.task_types):
+        # ---> [CHANGE 4b]: Added `idx` to enumeration for routing
+        for idx, (head, task_type) in enumerate(zip(self.actor_heads, self.task_types)):
+            
+            # ---> [CHANGE 4c]: Route temporal concepts to GRU state, static to raw features
+            is_temporal = (self.temporal_encoding == "gru" and idx in self.temporal_concepts)
+            head_input = h_t if is_temporal else features
+            
             if task_type == "classification":
                 logits = head(head_input)                      # [B, K]
                 dist = Categorical(logits=logits)
@@ -268,13 +284,23 @@ class ConceptActorCritic(nn.Module):
         h_prev: Optional[torch.Tensor] = None,
     ) -> Tuple[List[torch.Tensor], Optional[torch.Tensor]]:
         """Returns raw logits (for supervised loss) and new hidden state."""
-        head_input, h_t = self._get_head_input(features, h_prev)
+        
+        # ---> [CHANGE 5a]: Step GRU for supervised loss pass
+        h_t = self._step_gru(features, h_prev)
         logits = []
-        for head, task_type in zip(self.actor_heads, self.task_types):
+        
+        # ---> [CHANGE 5b]: Added `idx` to enumeration for routing
+        for idx, (head, task_type) in enumerate(zip(self.actor_heads, self.task_types)):
+            
+            # ---> [CHANGE 5c]: Route concepts exactly identically to the forward pass
+            is_temporal = (self.temporal_encoding == "gru" and idx in self.temporal_concepts)
+            head_input = h_t if is_temporal else features
+            
             if task_type == "classification":
                 logits.append(head(head_input))
             else:
                 logits.append(head["mu"](head_input))
+                
         return logits, h_t
 
     # ------------------------------------------------------------------

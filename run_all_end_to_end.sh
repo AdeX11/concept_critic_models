@@ -4,13 +4,13 @@
 # Methods:
 #   0. no_concept                         — plain PPO baseline
 #   1. vanilla_freeze                     — LICORICE supervised CBM
-#   2. concept_actor_critic (gru)         — new method with temporal encoding
+#   2. concept_actor_critic (stacked)         — new method with temporal encoding
 #   3. concept_actor_critic (none)        — new method without temporal encoding (ablation)
 
 set -e
 
 ENV=highway
-
+# For pick_place runs you can set STATE=true to use the state-only variant (no rendering/images)
 STATE=true
 
 
@@ -22,11 +22,11 @@ else
 fi
 
 # Defaults for full experiments
-TS=20000
-N_ENVS=8
+TS=75000
+N_ENVS=2
 SEED=42
-RESULTS_DIR=results/run_all_hw_state
-PLOTS_DIR=plots/run_all_hw_state
+RESULTS_DIR=results/run_all_hw_state_end
+PLOTS_DIR=plots/run_all_hw_state_end
 
 
 echo "========================================"
@@ -45,7 +45,8 @@ PID0=$!
 
 python train.py \
     --method vanilla_freeze \
-    --training_mode two_phase \
+    --training_mode end_to_end \
+    --temporal_encoding stacked \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -55,8 +56,8 @@ PID1=$!
 
 python train.py \
     --method concept_actor_critic \
-    --temporal_encoding gru \
-    --training_mode two_phase \
+    --temporal_encoding stacked \
+    --training_mode end_to_end \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -67,7 +68,7 @@ PID2=$!
 python train.py \
     --method concept_actor_critic \
     --temporal_encoding none \
-    --training_mode two_phase \
+    --training_mode end_to_end \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \

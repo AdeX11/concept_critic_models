@@ -126,7 +126,7 @@ def main():
     )
 
     # Print results
-    header = f"{'Concept':<35} {'Acc':>6} {'Chance':>8} {'Lift':>7}  Verdict"
+    header = f"{ 'Concept':<35} {'Acc':>6} {'Chance':>8} {'Lift':>7}  Verdict"
     print("\n" + header)
     print("-" * 75)
     for name, r in results.items():

@@ -111,6 +111,7 @@ class ActorCriticPolicy(nn.Module):
         task_types: List[str],
         num_classes: List[int],
         concept_dim: int,
+        temporal_concepts: Optional[List[int]] = None,
         temporal_encoding: str = "none",
         features_dim: int = 512,
         net_arch: Optional[List[int]] = None,
@@ -124,6 +125,7 @@ class ActorCriticPolicy(nn.Module):
         self.task_types = task_types
         self.num_classes = num_classes
         self.concept_dim = concept_dim
+        self.temporal_concepts = temporal_concepts
         self.temporal_encoding = temporal_encoding
         self.features_dim = features_dim
         self._device = torch.device(device) if isinstance(device, str) else device
@@ -149,13 +151,14 @@ class ActorCriticPolicy(nn.Module):
         self.concept_net: Optional[nn.Module] = None
         if method == "vanilla_freeze":
             self.concept_net = FlexibleMultiTaskNetwork(
-                features_dim, task_types, num_classes
+                features_dim, task_types, num_classes, temporal_concepts=temporal_concepts
             )
             mlp_input_dim = concept_dim          # integer concept vector → policy
         elif method == "concept_actor_critic":
             self.concept_net = ConceptActorCritic(
                 features_dim, task_types, num_classes,
                 temporal_encoding=temporal_encoding,
+                temporal_concepts=temporal_concepts,
             )
             mlp_input_dim = concept_dim
         else:

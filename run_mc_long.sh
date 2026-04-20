@@ -7,23 +7,41 @@
 
 set -e
 
-ENV=mountain_car
+ENV=pick_place
 TS=2000000
 N_ENVS=8
 SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results/mc_long
-PLOTS_DIR=plots/mc_long
+RESULTS_DIR=./results/pp_long
+PLOTS_DIR=./plots/pp_long
 
-mkdir -p $RESULTS_DIR $PLOTS_DIR
+# SMOKE mode: small local dry-runs (no_save)
+SMOKE=false
+if [ "$SMOKE" = "true" ]; then
+    echo "[run_mc_long] SMOKE mode: using small local runs (no_save)"
+    TS=2000
+    N_ENVS=1
+    RESULTS_DIR=./results/mc_long_smoke
+    PLOTS_DIR=./plots/mc_long_smoke
+fi
+
+# If running pick_place experiments, set STATE=true to use state-only variant
+STATE=false
+if [ "$STATE" = "true" ]; then
+    STATE_ARG="--state"
+else
+    STATE_ARG=""
+fi
 
 echo "========================================"
-echo "MountainCar (long): No Concept vs Vanilla Freeze vs Concept AC (joint)"
+echo "$ENV (long): No Concept vs Vanilla Freeze vs Concept AC (joint)"
 echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
 python train.py \
     --method no_concept \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -35,6 +53,8 @@ python train.py \
     --training_mode two_phase \
     --query_num_times 1 \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -47,6 +67,8 @@ python train.py \
     --training_mode joint \
     --query_num_times 1 \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -61,6 +83,7 @@ echo "========================================"
 
 python plot_results.py \
     --env $ENV \
+    $STATE_ARG \
     --results_dir $RESULTS_DIR \
     --output_dir $PLOTS_DIR
 

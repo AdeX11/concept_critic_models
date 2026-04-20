@@ -6,23 +6,42 @@
 
 set -e
 
-ENV=mountain_car
-TS=500000
-N_ENVS=8
-SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results/mc_comparison
-PLOTS_DIR=plots/mc_comparison
 
-mkdir -p $RESULTS_DIR $PLOTS_DIR
+ENV=pick_place
+TS=50000
+N_ENVS=2
+SEED=42
+RESULTS_DIR=./results/pp_comparison
+PLOTS_DIR=./plots/pp_comparison
+
+# If running pick_place experiments, set STATE=true to use state-only variant
+STATE=true
+if [ "$STATE" = "true" ]; then
+    STATE_ARG="--state"
+else
+    STATE_ARG=""
+fi
+
+# SMOKE mode: small local dry-runs (no_save)
+SMOKE=true
+if [ "$SMOKE" = "true" ]; then
+    echo "[run_mc_comparison] SMOKE mode: using small local runs (no_save)"
+    TS=2000
+    N_ENVS=1
+    RESULTS_DIR=./results/mc_comparison_smoke
+    PLOTS_DIR=./plots/mc_comparison_smoke
+fi
 
 echo "========================================"
-echo "MountainCar: No Concept vs Vanilla Freeze vs Concept AC joint (none)"
+echo "$ENV: No Concept vs Vanilla Freeze vs Concept AC joint (none)"
 echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
 python train.py \
     --method no_concept \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -34,6 +53,8 @@ python train.py \
     --training_mode two_phase \
     --query_num_times 1 \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -46,6 +67,8 @@ python train.py \
     --training_mode joint \
     --query_num_times 1 \
     --env $ENV --seed $SEED \
+    $STATE_ARG \
+    $( [ "$SMOKE" = "true" ] && echo "--no-save" ) \
     --total_timesteps $TS --n_envs $N_ENVS \
     --device cuda \
     --output_dir $RESULTS_DIR &
@@ -58,14 +81,15 @@ echo "========================================"
 echo "Training done. Generating results..."
 echo "========================================"
 
-python - <<'EOF'
+python - <<EOF
 import numpy as np, os
 
-results_dir = "/glade/derecho/scratch/adadelek/results/mc_comparison"
+results_dir = "$RESULTS_DIR"
+ENV = "$ENV"
 runs = {
-    "No Concept":            "no_concept_two_phase_none_mountain_car_seed42",
-    "Vanilla Freeze":        "vanilla_freeze_two_phase_none_mountain_car_seed42",
-    "Concept AC joint":      "concept_actor_critic_joint_none_mountain_car_seed42",
+    "No Concept":            f"no_concept_two_phase_none_{ENV}_seed42",
+    "Vanilla Freeze":        f"vanilla_freeze_two_phase_none_{ENV}_seed42",
+    "Concept AC joint":      f"concept_actor_critic_joint_none_{ENV}_seed42",
 }
 
 print("\n=== Task Reward ===")
@@ -73,12 +97,6 @@ print(f"{'Method':<22}  {'mean':>8}  {'last100':>8}  {'eval':>8}")
 print("-" * 55)
 for name, run in runs.items():
     r = np.load(f"{results_dir}/{run}/rewards.npy")
-    # eval reward from log
-    import subprocess
-    log = subprocess.check_output(
-        f"grep 'eval:' {results_dir}/{run}/../../../*.log 2>/dev/null || echo ''",
-        shell=True
-    ).decode().strip()
     print(f"{name:<22}  {np.mean(r):>8.2f}  {np.mean(r[-100:]):>8.2f}")
 
 print("\n=== Velocity Concept MSE (lower=better) ===")
@@ -100,6 +118,7 @@ EOF
 
 python plot_results.py \
     --env $ENV \
+    $STATE_ARG \
     --results_dir $RESULTS_DIR \
     --output_dir $PLOTS_DIR \
     2>/dev/null || echo "(plot_results.py skipped — check args)"

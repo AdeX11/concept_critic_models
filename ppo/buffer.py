@@ -215,91 +215,101 @@ class RolloutBuffer:
         self.concept_returns = self.concept_advantages + self.concept_values
 
     # ------------------------------------------------------------------
-    # Minibatch generator
+    # Minibatch generator (UPDATED FOR RNN SEQUENCES)
     # ------------------------------------------------------------------
 
     def get(
         self,
         batch_size: Optional[int] = None,
+        seq_len: int = 8,  # <-- NEW: Length of the temporal chunks
     ) -> Generator[dict, None, None]:
         """
-        Yields minibatches of flattened [T*N, ...] tensors as plain dicts.
-        Call after compute_returns_and_advantage().
+        Yields minibatches of flattened [seqs_per_batch * seq_len, ...] tensors.
+        Crucially, the data is shuffled at the SEQUENCE level, not the frame level.
+        Contiguous chunks of length `seq_len` are preserved in temporal order.
         """
         assert self.full, "Buffer not full; cannot iterate."
         T, N = self.buffer_size, self.n_envs
-        total = T * N
+
+        # Ensure buffer can be divided into clean sequences
+        assert T % seq_len == 0, f"buffer_size ({T}) must be a multiple of seq_len ({seq_len})"
+        
+        num_seqs = (T // seq_len) * N
+        
+        if batch_size is None:
+            batch_size = T * N
+            
+        assert batch_size % seq_len == 0, f"batch_size ({batch_size}) must be a multiple of seq_len ({seq_len})"
+        seqs_per_batch = batch_size // seq_len
 
         if not self._ready:
-            self._flat = self._flatten_all()
+            self._seq_flat = self._flatten_to_sequences(seq_len)
             self._ready = True
 
-        indices = np.random.permutation(total)
-        if batch_size is None:
-            batch_size = total
-
+        # Shuffle the sequences, NOT the individual frames!
+        indices = np.random.permutation(num_seqs)
+        
         start = 0
-        while start < total:
-            idx = indices[start: start + batch_size]
-            yield self._make_batch(idx)
-            start += batch_size
+        while start < num_seqs:
+            idx = indices[start : start + seqs_per_batch]
+            yield self._make_seq_batch(idx)
+            start += seqs_per_batch
 
-    def _flatten_all(self) -> dict:
+    def _flatten_to_sequences(self, seq_len: int) -> dict:
+        """Reshapes [T, N, ...] into [num_seqs, seq_len, ...]"""
+        T, N = self.buffer_size, self.n_envs
+        num_splits = T // seq_len
+
+        def reshape_to_seq(arr):
+            # arr is [T, N, ...]
+            shape = arr.shape
+            # 1. Split time dimension: [num_splits, seq_len, N, ...]
+            arr = arr.reshape(num_splits, seq_len, N, *shape[2:])
+            # 2. Swap seq_len and N: [num_splits, N, seq_len, ...]
+            arr = arr.swapaxes(1, 2)
+            # 3. Flatten splits and N: [num_splits * N, seq_len, ...]
+            arr = arr.reshape(num_splits * N, seq_len, *shape[2:])
+            return torch.as_tensor(arr, dtype=torch.float32)
+
         flat = {}
         if self.obs_is_dict:
-            flat["observations"] = {
-                k: torch.as_tensor(_swap_flatten(v), dtype=torch.float32)
-                for k, v in self.observations.items()
-            }
+            flat["observations"] = {k: reshape_to_seq(v) for k, v in self.observations.items()}
         else:
-            flat["observations"] = torch.as_tensor(
-                _swap_flatten(self.observations), dtype=torch.float32
-            )
+            flat["observations"] = reshape_to_seq(self.observations)
 
         for name in [
-            "concepts",
-            "hidden_states",
-            "actions",
-            "values",
-            "log_probs",
-            "advantages",
-            "returns",
-            "concept_values",
-            "concept_log_probs",
-            "concept_rewards",
-            "concept_advantages",
-            "concept_returns",
-            "episode_starts",
+            "concepts", "hidden_states", "actions", "values", "log_probs",
+            "advantages", "returns", "concept_values", "concept_log_probs",
+            "concept_rewards", "concept_advantages", "concept_returns", "episode_starts"
         ]:
             arr = getattr(self, name)
-            flat[name] = torch.as_tensor(_swap_flatten(arr), dtype=torch.float32)
+            flat[name] = reshape_to_seq(arr)
+            
         return flat
 
-    def _make_batch(self, idx: np.ndarray) -> dict:
-        flat = self._flat
+    def _make_seq_batch(self, idx: np.ndarray) -> dict:
+        """Slices out chosen sequences and flattens them back to standard batch format."""
         batch = {}
+        flat = self._seq_flat
+        
+        def flatten_batch(arr):
+            # arr is [seqs_per_batch, seq_len, ...] -> output [seqs_per_batch * seq_len, ...]
+            shape = arr.shape
+            return arr.reshape(shape[0] * shape[1], *shape[2:]).to(self.device)
+
         if self.obs_is_dict:
             batch["observations"] = {
-                k: v[idx].to(self.device)
+                k: flatten_batch(v[idx])
                 for k, v in flat["observations"].items()
             }
         else:
-            batch["observations"] = flat["observations"][idx].to(self.device)
+            batch["observations"] = flatten_batch(flat["observations"][idx])
 
         for name in [
-            "concepts",
-            "hidden_states",
-            "actions",
-            "values",
-            "log_probs",
-            "advantages",
-            "returns",
-            "concept_values",
-            "concept_log_probs",
-            "concept_rewards",
-            "concept_advantages",
-            "concept_returns",
+            "concepts", "hidden_states", "actions", "values", "log_probs",
+            "advantages", "returns", "concept_values", "concept_log_probs",
+            "concept_rewards", "concept_advantages", "concept_returns", "episode_starts"
         ]:
-            batch[name] = flat[name][idx].to(self.device)
+            batch[name] = flatten_batch(flat[name][idx])
 
         return batch

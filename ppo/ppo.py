@@ -111,6 +111,20 @@ class PPO:
         # concept_names is used for logging only; not a policy parameter
         concept_names_kwarg = policy_kwargs.pop("concept_names", None)
 
+        # -------------------------------------------------------------------
+        # THE FIX: Dynamically extract the ground truth from the environment
+        # -------------------------------------------------------------------
+        if hasattr(self.env, "task_types"):
+            policy_kwargs["task_types"] = self.env.task_types
+        if hasattr(self.env, "num_classes"):
+            policy_kwargs["num_classes"] = self.env.num_classes
+        if hasattr(self.env, "temporal_concepts"):
+            policy_kwargs["temporal_concepts"] = self.env.temporal_concepts
+            
+        # Optional but highly recommended: Auto-sync the logger names too!
+        if hasattr(self.env, "concept_names") and concept_names_kwarg is None:
+            concept_names_kwarg = self.env.concept_names
+
         # ---- Policy ----
         self.policy = ActorCriticPolicy(
             **policy_kwargs,
@@ -411,16 +425,6 @@ class PPO:
     # ==================================================================
 
     def train_policy(self) -> dict:
-        """
-        Standard PPO clipped surrogate loss.
-
-        Optimizer selection:
-          two_phase   — optimizer_exclude_concept: concept net frozen, updated only in
-                        train_concepts(). Mirrors LICORICE vanilla_freeze training.
-          end_to_end  — full optimizer: policy gradient flows through concept net,
-                        updating it jointly with the actor/critic heads.
-          no_concept  — always uses full optimizer (no concept net to freeze).
-        """
         self.policy.set_training_mode(True)
 
         if self.method != "no_concept" and self.training_mode == "two_phase":
@@ -429,17 +433,55 @@ class PPO:
             optimizer = self.policy.optimizer
 
         pg_losses, vf_losses, ent_losses = [], [], []
+        seq_len = 8  # Match this to your buffer's seq_len
 
         for _ in range(self.n_epochs):
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs     = batch["observations"]
                 actions = batch["actions"].long().flatten()
-                h_prev  = batch["hidden_states"] if self.method == "concept_actor_critic" else None
 
-                _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
-                    obs, actions, h_prev
-                )
+                # --- BPTT SEQUENCE UNROLLING ---
+                if self.method == "concept_actor_critic" and self.temporal_encoding == "gru":
+                    B_seq = self.batch_size // seq_len
+                    
+                    # 1. Bulk extract features for the whole batch (fast)
+                    features = self.policy.extract_features(obs)
+                    features_seq = features.view(B_seq, seq_len, -1)
+                    
+                    # 2. Get initial hidden state for each sequence (step 0 only)
+                    h_prev = batch["hidden_states"].view(B_seq, seq_len, -1)[:, 0, :].contiguous()
+                    actions_seq = actions.view(B_seq, seq_len)
+                    
+                    val_list, logp_list, ent_list = [], [], []
+                    
+                    # 3. Step through time, updating hidden state
+                    for t in range(seq_len):
+                        feat_t = features_seq[:, t]
+                        act_t  = actions_seq[:, t]
+                        
+                        # Bypass evaluate_actions to skip duplicate CNN extraction
+                        latent, h_prev, _, _ = self.policy._get_latent(feat_t, h_prev)
+                        
+                        action_logits = self.policy.action_net(latent)
+                        dist = torch.distributions.Categorical(logits=action_logits)
+                        
+                        val_list.append(self.policy.value_net(latent).flatten())
+                        logp_list.append(dist.log_prob(act_t))
+                        ent_list.append(dist.entropy())
+                        
+                    # 4. Restack and flatten back to standard batch format
+                    values = torch.stack(val_list, dim=1).flatten()
+                    log_prob = torch.stack(logp_list, dim=1).flatten()
+                    entropy = torch.stack(ent_list, dim=1).flatten()
+                    
+                else:
+                    # Non-temporal logic
+                    h_prev = None
+                    _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
+                        obs, actions, h_prev
+                    )
 
+                # --- STANDARD PPO LOSS ---
                 advantages = batch["advantages"]
                 if self.normalize_advantage and advantages.numel() > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -480,38 +522,55 @@ class PPO:
     # ==================================================================
 
     def train_concept_actor_critic(self) -> dict:
-        """
-        PPO-style update for the concept actor and concept critic.
-
-        Mirrors train_policy() exactly:
-          - called every iteration after collect_rollouts()
-          - iterates over the full rollout buffer for n_epochs
-          - uses clipped surrogate on concept log-probs weighted by concept advantages
-          - fits concept critic V_c to concept returns
-
-        This makes the concept actor-critic symmetric with the task actor-critic:
-          task actor   ← updated by value critic advantages    (train_policy)
-          concept actor ← updated by concept critic advantages (train_concept_actor_critic)
-        """
         if self.method != "concept_actor_critic":
             return {}
 
         self.policy.set_training_mode(True)
         concept_net = self.policy.concept_net
-        # concept_net + features_extractor are always the correct scope here:
-        # mlp_extractor/action_net/value_net are not in this forward pass so they
-        # receive no gradients regardless of optimizer choice.
         optimizer = self.policy.optimizer_concept_and_features
 
         actor_losses, critic_losses, ent_losses = [], [], []
+        seq_len = 8
 
-        for _ in range(50):
+        for _ in range(self.n_epochs):
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs    = batch["observations"]
-                h_prev = batch["hidden_states"]
-
+                
+                # 1. Bulk extract features
                 features = self.policy.extract_features(obs)
-                c_pred, _, concept_dists, V_c = concept_net(features, h_prev)
+                
+                # --- BPTT SEQUENCE UNROLLING ---
+                if self.temporal_encoding == "gru":
+                    B_seq = self.batch_size // seq_len
+                    features_seq = features.view(B_seq, seq_len, -1)
+                    
+                    # 2. Get initial hidden state
+                    h_prev = batch["hidden_states"].view(B_seq, seq_len, -1)[:, 0, :].contiguous()
+                    
+                    V_c_list, new_clp_list, ent_list = [], [], []
+                    
+                    # 3. Unroll
+                    for t in range(seq_len):
+                        feat_t = features_seq[:, t]
+                        c_p, h_prev, d_p, v_p = concept_net(feat_t, h_prev)
+                        
+                        clp_t = concept_net.concept_log_probs(d_p, c_p)
+                        # We calculate entropy here and apply the negative sign to match standard logic
+                        ent_t = -torch.stack([d.entropy() for d in d_p], dim=1).mean()
+                        
+                        V_c_list.append(v_p)
+                        new_clp_list.append(clp_t)
+                        ent_list.append(ent_t)
+                        
+                    # 4. Restack
+                    V_c = torch.stack(V_c_list, dim=1).flatten()
+                    new_clp = torch.stack(new_clp_list, dim=1).flatten()
+                    concept_ent_loss = torch.stack(ent_list).mean()
+                else:
+                    h_prev = None
+                    c_pred, _, concept_dists, V_c = concept_net(features, h_prev)
+                    new_clp = concept_net.concept_log_probs(concept_dists, c_pred)
+                    concept_ent_loss = -torch.stack([d.entropy() for d in concept_dists], dim=1).mean()
 
                 # ---- Concept actor loss (PPO-clipped) ----
                 c_adv = batch["concept_advantages"]
@@ -519,7 +578,6 @@ class PPO:
                     c_adv = (c_adv - c_adv.mean()) / (c_adv.std() + 1e-8)
 
                 old_clp = batch["concept_log_probs"]
-                new_clp = concept_net.concept_log_probs(concept_dists, c_pred)
                 ratio   = torch.exp(new_clp - old_clp)
 
                 ac_loss1 = c_adv * ratio
@@ -529,11 +587,6 @@ class PPO:
                 # ---- Concept critic loss ----
                 c_ret = batch["concept_returns"]
                 critic_loss = F.mse_loss(V_c.flatten(), c_ret)
-
-                # ---- Concept actor entropy (mirrors ent_coef * ent_loss in train_policy) ----
-                concept_ent_loss = -torch.stack(
-                    [d.entropy() for d in concept_dists], dim=1
-                ).mean()
 
                 loss = actor_loss + self.lambda_v * critic_loss + self.ent_coef * concept_ent_loss
 
@@ -555,7 +608,7 @@ class PPO:
             "concept_critic_loss": float(np.mean(critic_losses)),
             "concept_ent_loss":    float(np.mean(ent_losses)),
         }
-
+    
     # ==================================================================
     # train_concepts  (supervised anchor — called at label query times)
     # ==================================================================
@@ -712,11 +765,11 @@ class PPO:
         for i, (name, tt) in enumerate(zip(self.concept_names, self.policy.task_types)):
             p, t = c_pred_np[:, i], c_true_np[:, i]
             if tt == "classification":
-                metrics[name] = float(np.mean(np.round(p) == np.round(t)))
+                # Append _accuracy to classification tasks
+                metrics[f"{name}_acc"] = float(np.mean(np.round(p) == np.round(t)))
             else:
-                # MSE: robust for low-variance targets (e.g. MountainCar velocity).
-                # R² breaks down when ss_tot ≈ 0, making 1e-8 clamp dominate.
-                metrics[name] = float(np.mean((p - t) ** 2))
+                # Append _mse to regression tasks
+                metrics[f"{name}_mse"] = float(np.mean((p - t) ** 2))
         return metrics
 
     def _compute_concept_mse_from_buffer(self) -> dict:
