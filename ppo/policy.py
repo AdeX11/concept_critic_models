@@ -2,9 +2,10 @@
 policy.py — ActorCriticPolicy supporting all three methods.
 
 Methods:
-  no_concept        — features → mlp_extractor → actor/critic
-  vanilla_freeze    — features → FlexibleMultiTaskNetwork → mlp_extractor → actor/critic
-  concept_actor_critic — features → ConceptActorCritic (GRU) → mlp_extractor → actor/critic
+  no_concept           — features → mlp_extractor → actor/critic
+  vanilla_freeze       — features → FlexibleMultiTaskNetwork → mlp_extractor → actor/critic
+  concept_actor_critic — features → ConceptActorCritic → mlp_extractor → actor/critic
+  gvf                  — features → GVFConceptNetwork(concepts+gvfs) → mlp_extractor → actor/critic
 
 CNN feature extractor: NatureCNN for image observations, MLP for vector.
 Dict observations are handled by extracting the 'images' key (primary modality).
@@ -19,6 +20,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from .networks import FlexibleMultiTaskNetwork, ConceptActorCritic
+from .gvf import GVFConceptNetwork
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +112,7 @@ class ActorCriticPolicy(nn.Module):
         method: str,
         task_types: List[str],
         num_classes: List[int],
+        gvf_pairing: List[int],
         concept_dim: int,
         temporal_concepts: Optional[List[int]] = None,
         temporal_encoding: str = "none",
@@ -124,6 +127,7 @@ class ActorCriticPolicy(nn.Module):
         self.method = method
         self.task_types = task_types
         self.num_classes = num_classes
+        self.num_gvf = len(gvf_pairing)
         self.concept_dim = concept_dim
         self.temporal_concepts = temporal_concepts
         self.temporal_encoding = temporal_encoding
@@ -160,7 +164,13 @@ class ActorCriticPolicy(nn.Module):
                 temporal_encoding=temporal_encoding,
                 temporal_concepts=temporal_concepts,
             )
-            mlp_input_dim = concept_dim
+            mlp_input_dim = concept_dim          # integer concept vector → policy
+        elif method == "gvf":
+            self.concept_net = GVFConceptNetwork(
+                features_dim, task_types, num_classes, gvf_pairing=gvf_pairing,
+                temporal_encoding=temporal_encoding,
+            )
+            mlp_input_dim = concept_dim + self.concept_net.num_gvf
         else:
             # no_concept
             mlp_input_dim = features_dim
@@ -280,6 +290,9 @@ class ActorCriticPolicy(nn.Module):
             latent = self.mlp_extractor(c_t)
         elif self.method == "concept_actor_critic":
             c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)
+            latent = self.mlp_extractor(c_t)
+        elif self.method == "gvf":
+            c_t, h_new = self.concept_net(features, h_prev)
             latent = self.mlp_extractor(c_t)
         else:
             raise ValueError(f"Unknown method: {self.method}")

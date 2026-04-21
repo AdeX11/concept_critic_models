@@ -22,3 +22,6 @@ env/
 
 # OS
 .DS_Store
+
+# Other
+slurm_commands
