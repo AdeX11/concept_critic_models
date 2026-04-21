@@ -45,7 +45,7 @@ METHOD_COLORS = {
     "no_concept":           "#1f77b4",
     "vanilla_freeze":       "#ff7f0e",
     "concept_actor_critic": "#2ca02c",
-    "gvf":                  "#d62728",
+    "gvf":                  "#9327d6",
 }
 
 # Directory name format: <method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>

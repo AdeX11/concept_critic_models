@@ -1,37 +1,29 @@
 #!/bin/bash
-# run_all.sh — launch 4 experiments in parallel sharing 1 GPU, then plot results.
-#
-# Methods:
-#   0. no_concept                         — plain PPO baseline
-#   1. vanilla_freeze                     — LICORICE supervised CBM
-#   2. concept_actor_critic (stacked)         — new method with temporal encoding
-#   3. concept_actor_critic (none)        — new method without temporal encoding (ablation)
+# Methods: PPO, Vanilla CBM, Concept Actor-Critic, GVF
+# Config: End-to-End, Stacked Temporal Encoding
 
 set -e
 
-ENV=highway
-# For pick_place runs you can set STATE=true to use the state-only variant (no rendering/images)
-STATE=false
+# --- CONFIGURATION ---
+ENV="highway" # Options: highway, pick_place
+STATE=true    # Options: true (state), false (pixels)
 
+# --- DYNAMIC NAMING ---
+if [ "$ENV" = "highway" ]; then ENV_SHORT="hw"; else ENV_SHORT="pp"; fi
+if [ "$STATE" = "true" ]; then STATE_SHORT="state"; STATE_ARG="--state"; else STATE_SHORT="pixels"; STATE_ARG=""; fi
 
-# Build optional STATE_ARG passed to train.py
-if [ "$STATE" = "true" ]; then
-    STATE_ARG="--state"
-else
-    STATE_ARG=""
-fi
+RUN_NAME="${ENV_SHORT}_${STATE_SHORT}"
+RESULTS_DIR="results/stacked_end/$RUN_NAME"
+PLOTS_DIR="plots/stacked_end/$RUN_NAME"
 
-# Defaults for full experiments
-TS=50000
-N_ENVS=2
+TS=500000
+N_ENVS=6
 SEED=42
-RESULTS_DIR=results/run_all_hw
-PLOTS_DIR=plots/run_all_hw
-
 
 echo "========================================"
-echo "Starting 4 parallel training runs (shared GPU)"
-echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
+echo "Starting 4 parallel training runs (CPU only)"
+echo "Config: $RUN_NAME | env=$ENV | seed=$SEED"
+echo "Output: $RESULTS_DIR"
 echo "========================================"
 
 python train.py \
@@ -45,7 +37,8 @@ PID0=$!
 
 python train.py \
     --method vanilla_freeze \
-    --training_mode two_phase \
+    --training_mode end_to_end \
+    --temporal_encoding stacked \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -55,8 +48,8 @@ PID1=$!
 
 python train.py \
     --method concept_actor_critic \
+    --training_mode end_to_end \
     --temporal_encoding stacked \
-    --training_mode two_phase \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -65,9 +58,9 @@ python train.py \
 PID2=$!
 
 python train.py \
-    --method concept_actor_critic \
-    --temporal_encoding none \
-    --training_mode two_phase \
+    --method gvf \
+    --training_mode end_to_end \
+    --temporal_encoding stacked \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \

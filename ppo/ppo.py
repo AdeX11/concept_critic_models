@@ -509,6 +509,15 @@ class PPO:
                     _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
                         obs, actions, h_prev
                     )
+                h_prev  = (
+                    batch["hidden_states"]
+                    if self.method in ("concept_actor_critic", "gvf") and self.temporal_encoding == "gru"
+                    else None
+                )
+
+                _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
+                    obs, actions, h_prev
+                )
 
                 # --- STANDARD PPO LOSS ---
                 advantages = batch["advantages"]
@@ -671,128 +680,20 @@ class PPO:
     # train_gvf
     # ==================================================================
 
-    def train_gvf(self) -> dict:
-        """
-        Train GVF heads to predict discounted cumulant expectations.
-
-        Each GVF head j is paired with one concept index via gvf_pairing[j].
-        The paired concept value in rollout_buffer.concepts is treated as the
-        cumulant c_t, and the training target is:
-
-          G_t = c_t + gamma * (1 - done_t) * G_{t+1}
-
-        where done_t is inferred from episode starts at the next step.
-        """
-        if self.method != "gvf":
-            print("Warning: train_gvf called but method is not gvf")
-            return {}
-        if not self.rollout_buffer.full:
-            print("Warning: train_gvf called but rollout buffer is not full")
-            return {}
-        if self.gvf_pairing is None or len(self.gvf_pairing) == 0:
-            print("Warning: train_gvf called but gvf_pairing is not set")
-            return {}
-        if self.policy.concept_net is None or not hasattr(self.policy.concept_net, "get_gvf_logits"):
-            print("Warning: train_gvf called but concept_net does not have get_gvf_logits")
-            return {}
-
-        self.policy.set_training_mode(True)
-        optimizer = self.policy.optimizer_concept_and_features
-        if optimizer is None:
-            return {}
-
-        T = self.rollout_buffer.buffer_size
-        N = self.rollout_buffer.n_envs
-        num_gvf = len(self.gvf_pairing)
-        concept_dim = self.rollout_buffer.concept_dim
-
-        # Convert pairing to concept indices (STRICTLY 0-based).
-        pairing_indices = []
-        for pairing in self.gvf_pairing:
-            idx = int(pairing)
-            if idx < 0 or idx >= concept_dim:
-                raise ValueError(
-                    f"Invalid gvf_pairing index {pairing}; expected 0-based concept index in "
-                    f"[0, {concept_dim - 1}]."
-                )
-            pairing_indices.append(idx)
-
-        concepts = self.rollout_buffer.concepts  # [T, N, concept_dim]
-        episode_starts = self.rollout_buffer.episode_starts  # [T, N]
-
-        # Build discounted targets G_t for each GVF head and env.
-        gvf_targets = np.zeros((T, N, num_gvf), dtype=np.float32)
-        running = np.zeros((N, num_gvf), dtype=np.float32)
-        for step in reversed(range(T)):
-            if step < T - 1:
-                # If next step starts a new episode, bootstrap is zero.
-                running *= (1.0 - episode_starts[step + 1])[:, None]
-            # Two-step index → [N, num_gvf]; concepts[step,:,idx] is [num_gvf,N] in numpy.
-            cumulants_t = concepts[step][:, pairing_indices]
-            running = cumulants_t + self.gamma * running
-            gvf_targets[step] = running
-
-        # Match RolloutBuffer flattening order: [T, N, ...] -> [T*N, ...].
-        gvf_targets_flat = gvf_targets.swapaxes(0, 1).reshape(T * N, num_gvf)
-
-        if self.rollout_buffer.obs_is_dict:
-            obs_flat = {
-                k: self.rollout_buffer.observations[k].swapaxes(0, 1).reshape(T * N, *v.shape[2:])
-                for k, v in self.rollout_buffer.observations.items()
-            }
-        else:
-            obs_flat = self.rollout_buffer.observations.swapaxes(0, 1).reshape(
-                T * N, *self.rollout_buffer.observations.shape[2:]
-            )
-        hidden_flat = self.rollout_buffer.hidden_states.swapaxes(0, 1).reshape(T * N, self.hidden_dim)
-
-        gvf_losses = []
-        concept_net = self.policy.concept_net
-        total = T * N
-        for _ in range(self.n_epochs):
-            perm = np.random.permutation(total)
-            for start in range(0, total, self.batch_size):
-                bidx = perm[start: start + self.batch_size]
-
-                if isinstance(obs_flat, dict):
-                    obs_b = {
-                        k: torch.as_tensor(obs_flat[k][bidx], dtype=torch.float32, device=self.device)
-                        for k in obs_flat
-                    }
-                else:
-                    obs_b = torch.as_tensor(obs_flat[bidx], dtype=torch.float32, device=self.device)
-
-                h_prev = None
-                if self.temporal_encoding == "gru":
-                    h_prev = torch.as_tensor(
-                        hidden_flat[bidx], dtype=torch.float32, device=self.device
-                    )
-                target_batch = torch.as_tensor(
-                    gvf_targets_flat[bidx], dtype=torch.float32, device=self.device
-                )
-
-                features = self.policy.extract_features(obs_b)
-                gvf_logits, _ = concept_net.get_gvf_logits(features, h_prev)
-                gvf_pred = torch.cat([g.squeeze(-1).unsqueeze(1) for g in gvf_logits], dim=1)
-                loss = F.mse_loss(gvf_pred, target_batch)
-
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.policy.features_extractor.parameters()) +
-                    list(concept_net.parameters()),
-                    self.max_grad_norm,
-                )
-                optimizer.step()
-                gvf_losses.append(loss.item())
-
-        return {"gvf_loss": float(np.mean(gvf_losses))} if gvf_losses else {}
-
-    # ==================================================================
-    # train_concept_actor_critic
-    # ==================================================================
-
     def train_concept_actor_critic(self) -> dict:
+        """
+        PPO-style update for the concept actor and concept critic.
+
+        Mirrors train_policy() exactly:
+          - called every iteration after collect_rollouts()
+          - iterates over the full rollout buffer for n_epochs
+          - uses clipped surrogate on concept log-probs weighted by concept advantages
+          - fits concept critic V_c to concept returns
+
+        This makes the concept actor-critic symmetric with the task actor-critic:
+          task actor   ← updated by value critic advantages    (train_policy)
+          concept actor ← updated by concept critic advantages (train_concept_actor_critic)
+        """
         if self.method != "concept_actor_critic":
             return {}
 
