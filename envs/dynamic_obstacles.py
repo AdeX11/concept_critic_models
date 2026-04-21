@@ -214,6 +214,75 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
 
 
 # ---------------------------------------------------------------------------
+# Position-only state variant (movable flags and obstacle move directions excluded)
+# ---------------------------------------------------------------------------
+
+class DynamicObstaclesPosOnlyConceptEnvWrapper(DynamicObstaclesEnvWrapper):
+    """
+    DynamicObstacles with state-based observations restricted to position/direction indices.
+
+    Observation (7-dim): [agent_x, agent_y, agent_dir, obs1_x, obs1_y, obs2_x, obs2_y]
+    Concepts    (7-dim): same as observation
+
+    No image rendering — the raw grid state is used directly.  Movable flags (indices 7-10)
+    and obstacle move directions (indices 11-12) are excluded from both observation and concept.
+    """
+
+    OBS_INDICES = [0, 1, 2, 3, 4, 5, 6]
+
+    def __init__(self, env: gym.Env, concept_version: int = 3, grid_size: int = 8):
+        super().__init__(env, concept_version=concept_version, n_stack=1, grid_size=grid_size)
+
+        pos_classes = grid_size
+        self.observation_space = gym.spaces.Box(
+            low=0.0, high=float(grid_size - 1),
+            shape=(7,),
+            dtype=np.float32,
+        )
+        self.task_types = ["classification"] * 7
+        self.num_classes = [pos_classes, pos_classes, 4,
+                            pos_classes, pos_classes,
+                            pos_classes, pos_classes]
+        self.concept_names = [
+            "agent_position_x", "agent_position_y", "agent_direction",
+            "obstacle1_position_x", "obstacle1_position_y",
+            "obstacle2_position_x", "obstacle2_position_y",
+        ]
+        # All included concepts are directly readable from the state — no temporal concepts
+        self.temporal_concepts = []
+        self.current_concept = np.zeros(7, dtype=np.float32)
+
+    def _state_obs(self, full_concept: np.ndarray) -> np.ndarray:
+        return full_concept[self.OBS_INDICES].astype(np.float32)
+
+    def reset(self, **kwargs):
+        _obs, info = self.env.reset(**kwargs)
+        self._prev_obstacle_positions = self._get_obstacle_positions()
+        self._current_obstacle_velocities = [(0, 0), (0, 0)]
+        full_concept = self._compute_concept()
+        self.current_concept = self._state_obs(full_concept)
+        info["concept"] = self.current_concept.copy()
+        return self._state_obs(full_concept), info
+
+    def step(self, action):
+        prev_positions = self._get_obstacle_positions()
+        _obs, reward, done, truncated, info = self.env.step(action)
+        curr_positions = self._get_obstacle_positions()
+        self._current_obstacle_velocities = [
+            (curr_positions[i][0] - prev_positions[i][0],
+             curr_positions[i][1] - prev_positions[i][1])
+            for i in range(2)
+        ]
+        full_concept = self._compute_concept()
+        self.current_concept = self._state_obs(full_concept)
+        state_obs = self._state_obs(full_concept)
+        if done or truncated:
+            info["terminal_observation"] = state_obs
+        info["concept"] = self.current_concept.copy()
+        return state_obs, reward, done, truncated, info
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -281,5 +350,58 @@ def make_single_dynamic_obstacles_env(seed: int = 0, n_stack: int = 1, grid_size
 
     env = gym.make(env_id, render_mode="rgb_array", highlight=False)
     env = DynamicObstaclesEnvWrapper(env, concept_version=3, n_stack=n_stack, grid_size=grid_size)
+    env.reset(seed=seed)
+    return env
+
+
+def _register_dynamic_obstacles_env(grid_size: int) -> str:
+    """Register (if needed) and return the env id for the given grid size."""
+    from gymnasium.envs.registration import register
+
+    env_id = f"MiniGrid-Custom-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
+    try:
+        import sys, os
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
+        sys.path.insert(0, os.path.abspath(scripts_dir))
+        from custom_dynamic_obstacles_env import CustomDynamicObstaclesEnv  # noqa: F401
+        try:
+            register(
+                id=env_id,
+                entry_point="custom_dynamic_obstacles_env:CustomDynamicObstaclesEnv",
+                kwargs={"size": grid_size, "n_obstacles": 2},
+            )
+        except Exception:
+            pass  # already registered
+    except ImportError:
+        import minigrid  # noqa: F401
+        env_id = f"MiniGrid-Dynamic-Obstacles-{grid_size}x{grid_size}-v0"
+    return env_id
+
+
+def make_dynamic_obstacles_pos_only_concept_env(
+    n_envs: int = 4, seed: int = 0, grid_size: int = 8, **_
+) -> gym.Env:
+    """Vectorised DynamicObstacles with 7-dim state observations (positions + direction only)."""
+    from gymnasium.vector import AsyncVectorEnv
+
+    env_id = _register_dynamic_obstacles_env(grid_size)
+
+    def _make(rank: int):
+        def _init():
+            env = gym.make(env_id, render_mode="rgb_array", highlight=False)
+            env = DynamicObstaclesPosOnlyConceptEnvWrapper(env, concept_version=3, grid_size=grid_size)
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_dynamic_obstacles_pos_only_concept_env(
+    seed: int = 0, grid_size: int = 8, **_
+) -> DynamicObstaclesPosOnlyConceptEnvWrapper:
+    env_id = _register_dynamic_obstacles_env(grid_size)
+    env = gym.make(env_id, render_mode="rgb_array", highlight=False)
+    env = DynamicObstaclesPosOnlyConceptEnvWrapper(env, concept_version=3, grid_size=grid_size)
     env.reset(seed=seed)
     return env

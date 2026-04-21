@@ -28,7 +28,8 @@ from envs.cartpole        import make_cartpole_env,          make_single_cartpol
 from envs.dynamic_obstacles import make_dynamic_obstacles_env, make_single_dynamic_obstacles_env
 from envs.lunar_lander    import (make_lunar_lander_env,           make_single_lunar_lander_env,
                                    make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
-                                   make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
+                                   make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env,
+                                   make_lunar_lander_pos_only_concept_env, make_single_lunar_lander_pos_only_concept_env)
 from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
 from ppo.ppo              import PPO
 
@@ -73,6 +74,9 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander_pos_only":
         vec_env    = make_lunar_lander_pos_only_env(n_envs, seed)
         single_env = make_single_lunar_lander_pos_only_env(seed)
+    elif env_name == "lunar_lander_pos_only_concept":
+        vec_env    = make_lunar_lander_pos_only_concept_env(n_envs, seed)
+        single_env = make_single_lunar_lander_pos_only_concept_env(seed)
     elif env_name == "mountain_car":
         vec_env    = make_mountain_car_env(n_envs, seed)
         single_env = make_single_mountain_car_env(seed)
@@ -99,11 +103,11 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RL agent with optional concept bottleneck.")
     parser.add_argument("--method", required=True,
-                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
+                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"])
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
-                                 "mountain_car"])
+                                 "lunar_lander_pos_only_concept", "mountain_car"])
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "
@@ -131,7 +135,7 @@ def main() -> None:
     parser.add_argument("--lambda_s",          type=float, default=0.5,
                         help="Supervised anchor loss weight (concept_actor_critic only)")
     parser.add_argument("--device",            type=str,   default="auto")
-    parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
+    parser.add_argument("--output_dir",        type=str,   default="/users/dkang33/concept_critic_models/output")
     args = parser.parse_args()
 
     set_seed(args.seed)

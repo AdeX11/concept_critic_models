@@ -32,18 +32,20 @@ import matplotlib.pyplot as plt
 # Constants
 # ---------------------------------------------------------------------------
 
-METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic"]
+METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"]
 
 METHOD_LABELS = {
     "no_concept":           "No Concept (PPO)",
     "vanilla_freeze":       "Vanilla Freeze (CBM)",
     "concept_actor_critic": "Concept Actor-Critic",
+    "gvf":                  "GVF",
 }
 
 METHOD_COLORS = {
     "no_concept":           "#1f77b4",
     "vanilla_freeze":       "#ff7f0e",
     "concept_actor_critic": "#2ca02c",
+    "gvf":                  "#d62728",
 }
 
 # Directory name format: <method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>
@@ -463,11 +465,11 @@ def main() -> None:
     )
     parser.add_argument("--env", required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only", "mountain_car"])
+                                 "lunar_lander_state", "lunar_lander_pos_only", "lunar_lander_pos_only_concept", "mountain_car"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
-    parser.add_argument("--results_dir",  type=str, default="/glade/derecho/scratch/adadelek/results",
+    parser.add_argument("--results_dir",  type=str, default="/users/dkang33/concept_critic_models/output",
                         help="Directory containing completed run subdirectories")
-    parser.add_argument("--output_dir",   type=str, default="plots",
+    parser.add_argument("--output_dir",   type=str, default="/users/dkang33/concept_critic_models/plots",
                         help="Where to save plots and summary (kept local)")
     parser.add_argument("--smooth_window", type=int, default=30)
     args = parser.parse_args()

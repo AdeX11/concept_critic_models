@@ -47,6 +47,7 @@ class PPO:
       - no_concept
       - vanilla_freeze
       - concept_actor_critic
+      - gvf
     """
 
     def __init__(
@@ -74,7 +75,7 @@ class PPO:
         device: str = "auto",
         verbose: int = 1,
     ):
-        assert method in ("no_concept", "vanilla_freeze", "concept_actor_critic"), (
+        assert method in ("no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"), (
             f"Unknown method: {method}"
         )
         assert training_mode in ("two_phase", "end_to_end", "joint"), (
@@ -100,6 +101,12 @@ class PPO:
         self.normalize_advantage = normalize_advantage
         self.seed = seed
         self.verbose = verbose
+        concept_dim = int(policy_kwargs["concept_dim"])
+        gvf_pairing_from_kwargs = policy_kwargs.pop("gvf_pairing", None)
+        if gvf_pairing_from_kwargs is not None:
+            self.gvf_pairing = list(gvf_pairing_from_kwargs)
+        else:
+            self.gvf_pairing = list(range(concept_dim))
 
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -116,8 +123,14 @@ class PPO:
             **policy_kwargs,
             method=method,
             temporal_encoding=temporal_encoding,
+            gvf_pairing=self.gvf_pairing,
         ).to(self.device)
         self.policy.update_lr(learning_rate)
+
+        assert all(
+            isinstance(pairing, (int, np.integer)) and 0 <= int(pairing) < concept_dim
+            for pairing in self.gvf_pairing
+        ), "gvf_pairing must contain valid concept indices in [0, concept_dim - 1]"
 
         # ---- Rollout buffer ----
         obs_shape   = policy_kwargs["obs_shape"]
@@ -226,6 +239,7 @@ class PPO:
                 self.train_concepts(obs_flat, con_flat, n_epochs=1, batch_size=self.batch_size)
 
             # ---- Train concept actor-critic (every iteration, mirrors train_policy) ----
+            gvf_stats = self.train_gvf()
             concept_ac_stats = self.train_concept_actor_critic()
 
             # ---- Concept accuracy tracking (every 10 iters) ----
@@ -249,6 +263,8 @@ class PPO:
                         f"  cc_loss={concept_ac_stats.get('concept_critic_loss', 0):.4f}"
                         f"  ce_loss={concept_ac_stats.get('concept_ent_loss', 0):.4f}"
                     )
+                if gvf_stats:
+                    extra += f"  gvf_loss={gvf_stats.get('gvf_loss', 0):.4f}"
                 if concept_loss_log:
                     mse_str = "  ".join(
                         f"{n}={v:.5f}" for n, v in concept_loss_log.items()
@@ -274,7 +290,7 @@ class PPO:
     def collect_rollouts(self) -> None:
         """
         Run policy for n_steps, fill rollout buffer.
-        Carries GRU hidden state across steps for concept_actor_critic.
+        Carries GRU hidden state across steps for concept_actor_critic/gvf.
         Resets h_t at episode boundaries.
         """
         self.policy.set_training_mode(False)
@@ -289,14 +305,16 @@ class PPO:
 
             with torch.no_grad():
                 # Reset hidden state at episode boundaries
+                c_t = None
+                h_prev_for_buffer = h_t.clone() if self.temporal_encoding == "gru" else None
                 if self.method == "concept_actor_critic":
                     if self.temporal_encoding == "gru":
                         reset_mask = torch.as_tensor(
                             episode_starts, dtype=torch.float32, device=self.device
                         ).unsqueeze(1)
                         h_t = h_t * (1.0 - reset_mask)
-                    # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
-                    h_prev_for_buffer = h_t.clone()
+                        # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
+                        h_prev_for_buffer = h_t.clone()
                     # Full forward pass
                     features = self.policy.extract_features(obs_tensor)
                     c_t, h_new, concept_dists, V_c = self.policy.concept_net(
@@ -317,10 +335,17 @@ class PPO:
                     if h_new is not None:
                         h_t = h_new
                 else:
+                    if self.method == "gvf" and self.temporal_encoding == "gru":
+                        reset_mask = torch.as_tensor(
+                            episode_starts, dtype=torch.float32, device=self.device
+                        ).unsqueeze(1)
+                        h_t = h_t * (1.0 - reset_mask)
+                        h_prev_for_buffer = h_t.clone()
                     actions, values, log_probs, h_new = self.policy.forward(
-                        obs_tensor
+                        obs_tensor, h_t if self.method == "gvf" else None
                     )
-                    h_new = None  # not used
+                    if self.method == "gvf" and h_new is not None:
+                        h_t = h_new
                     concept_log_prob = None
                     concept_value = None
 
@@ -357,10 +382,7 @@ class PPO:
                 episode_start=episode_starts.astype(np.float32),
                 value=values,
                 log_prob=log_probs,
-                hidden_state=(
-                    h_prev_for_buffer.cpu().numpy()
-                    if self.temporal_encoding == "gru" else None
-                ),
+                hidden_state=(h_prev_for_buffer.cpu().numpy() if h_prev_for_buffer is not None else None),
                 concept_value=concept_value,
                 concept_log_prob=concept_log_prob,
                 concept_reward=concept_reward,
@@ -394,6 +416,13 @@ class PPO:
                 latent = self.policy.mlp_extractor(c_t)
                 last_values = self.policy.value_net(latent).flatten()
                 last_concept_values = V_c_last.flatten()
+            elif self.method == "gvf" and self.temporal_encoding == "gru":
+                reset_mask = torch.as_tensor(
+                    episode_starts, dtype=torch.float32, device=self.device
+                ).unsqueeze(1)
+                h_t_final = h_t * (1.0 - reset_mask)
+                _, last_values, _, _ = self.policy.forward(obs_tensor, h_t_final)
+                last_concept_values = torch.zeros(self.n_envs, device=self.device)
             else:
                 _, last_values, _, _ = self.policy.forward(obs_tensor)
                 last_concept_values = torch.zeros(self.n_envs, device=self.device)
@@ -434,7 +463,11 @@ class PPO:
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs     = batch["observations"]
                 actions = batch["actions"].long().flatten()
-                h_prev  = batch["hidden_states"] if self.method == "concept_actor_critic" else None
+                h_prev  = (
+                    batch["hidden_states"]
+                    if self.method in ("concept_actor_critic", "gvf") and self.temporal_encoding == "gru"
+                    else None
+                )
 
                 _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
                     obs, actions, h_prev
@@ -474,6 +507,127 @@ class PPO:
             "vf_loss": float(np.mean(vf_losses)),
             "ent_loss": float(np.mean(ent_losses)),
         }
+
+    # ==================================================================
+    # train_gvf
+    # ==================================================================
+
+    def train_gvf(self) -> dict:
+        """
+        Train GVF heads to predict discounted cumulant expectations.
+
+        Each GVF head j is paired with one concept index via gvf_pairing[j].
+        The paired concept value in rollout_buffer.concepts is treated as the
+        cumulant c_t, and the training target is:
+
+          G_t = c_t + gamma * (1 - done_t) * G_{t+1}
+
+        where done_t is inferred from episode starts at the next step.
+        """
+        if self.method != "gvf":
+            print("Warning: train_gvf called but method is not gvf")
+            return {}
+        if not self.rollout_buffer.full:
+            print("Warning: train_gvf called but rollout buffer is not full")
+            return {}
+        if self.gvf_pairing is None or len(self.gvf_pairing) == 0:
+            print("Warning: train_gvf called but gvf_pairing is not set")
+            return {}
+        if self.policy.concept_net is None or not hasattr(self.policy.concept_net, "get_gvf_logits"):
+            print("Warning: train_gvf called but concept_net does not have get_gvf_logits")
+            return {}
+
+        self.policy.set_training_mode(True)
+        optimizer = self.policy.optimizer_concept_and_features
+        if optimizer is None:
+            return {}
+
+        T = self.rollout_buffer.buffer_size
+        N = self.rollout_buffer.n_envs
+        num_gvf = len(self.gvf_pairing)
+        concept_dim = self.rollout_buffer.concept_dim
+
+        # Convert pairing to concept indices (STRICTLY 0-based).
+        pairing_indices = []
+        for pairing in self.gvf_pairing:
+            idx = int(pairing)
+            if idx < 0 or idx >= concept_dim:
+                raise ValueError(
+                    f"Invalid gvf_pairing index {pairing}; expected 0-based concept index in "
+                    f"[0, {concept_dim - 1}]."
+                )
+            pairing_indices.append(idx)
+
+        concepts = self.rollout_buffer.concepts  # [T, N, concept_dim]
+        episode_starts = self.rollout_buffer.episode_starts  # [T, N]
+
+        # Build discounted targets G_t for each GVF head and env.
+        gvf_targets = np.zeros((T, N, num_gvf), dtype=np.float32)
+        running = np.zeros((N, num_gvf), dtype=np.float32)
+        for step in reversed(range(T)):
+            if step < T - 1:
+                # If next step starts a new episode, bootstrap is zero.
+                running *= (1.0 - episode_starts[step + 1])[:, None]
+            # Two-step index → [N, num_gvf]; concepts[step,:,idx] is [num_gvf,N] in numpy.
+            cumulants_t = concepts[step][:, pairing_indices]
+            running = cumulants_t + self.gamma * running
+            gvf_targets[step] = running
+
+        # Match RolloutBuffer flattening order: [T, N, ...] -> [T*N, ...].
+        gvf_targets_flat = gvf_targets.swapaxes(0, 1).reshape(T * N, num_gvf)
+
+        if self.rollout_buffer.obs_is_dict:
+            obs_flat = {
+                k: self.rollout_buffer.observations[k].swapaxes(0, 1).reshape(T * N, *v.shape[2:])
+                for k, v in self.rollout_buffer.observations.items()
+            }
+        else:
+            obs_flat = self.rollout_buffer.observations.swapaxes(0, 1).reshape(
+                T * N, *self.rollout_buffer.observations.shape[2:]
+            )
+        hidden_flat = self.rollout_buffer.hidden_states.swapaxes(0, 1).reshape(T * N, self.hidden_dim)
+
+        gvf_losses = []
+        concept_net = self.policy.concept_net
+        total = T * N
+        for _ in range(self.n_epochs):
+            perm = np.random.permutation(total)
+            for start in range(0, total, self.batch_size):
+                bidx = perm[start: start + self.batch_size]
+
+                if isinstance(obs_flat, dict):
+                    obs_b = {
+                        k: torch.as_tensor(obs_flat[k][bidx], dtype=torch.float32, device=self.device)
+                        for k in obs_flat
+                    }
+                else:
+                    obs_b = torch.as_tensor(obs_flat[bidx], dtype=torch.float32, device=self.device)
+
+                h_prev = None
+                if self.temporal_encoding == "gru":
+                    h_prev = torch.as_tensor(
+                        hidden_flat[bidx], dtype=torch.float32, device=self.device
+                    )
+                target_batch = torch.as_tensor(
+                    gvf_targets_flat[bidx], dtype=torch.float32, device=self.device
+                )
+
+                features = self.policy.extract_features(obs_b)
+                gvf_logits, _ = concept_net.get_gvf_logits(features, h_prev)
+                gvf_pred = torch.cat([g.squeeze(-1).unsqueeze(1) for g in gvf_logits], dim=1)
+                loss = F.mse_loss(gvf_pred, target_batch)
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.policy.features_extractor.parameters()) +
+                    list(concept_net.parameters()),
+                    self.max_grad_norm,
+                )
+                optimizer.step()
+                gvf_losses.append(loss.item())
+
+        return {"gvf_loss": float(np.mean(gvf_losses))} if gvf_losses else {}
 
     # ==================================================================
     # train_concept_actor_critic
@@ -659,7 +813,7 @@ class PPO:
         N = self.n_envs
 
         with torch.no_grad():
-            if self.method == "concept_actor_critic" and self.temporal_encoding == "gru":
+            if self.method in ("concept_actor_critic", "gvf") and self.temporal_encoding == "gru":
                 # Sequential evaluation: carry h_t in order across timesteps
                 h_t = torch.zeros(N, self.hidden_dim, device=self.device)
                 all_pred, all_true = [], []
@@ -685,7 +839,11 @@ class PPO:
                     h_t = h_t * (1.0 - ep_start)
 
                     features = self.policy.extract_features(obs_t)
-                    c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
+                    if self.method == "concept_actor_critic":
+                        c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
+                    else:
+                        c_pred, h_t = self.policy.concept_net(features, h_t)
+                        c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
                     all_pred.append(c_pred.cpu())
                     all_true.append(
                         torch.as_tensor(buf.concepts[step], dtype=torch.float32)
@@ -701,6 +859,9 @@ class PPO:
                 features = self.policy.extract_features(obs)
                 if self.method == "vanilla_freeze":
                     c_pred = self.policy.concept_net(features)
+                elif self.method == "gvf":
+                    c_pred, _ = self.policy.concept_net(features, None)
+                    c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
                 else:
                     c_pred, _, _, _ = self.policy.concept_net(features, None)
                 c_pred_np = c_pred.cpu().numpy()
@@ -731,6 +892,10 @@ class PPO:
             features = self.policy.extract_features(obs)
             if self.method == "vanilla_freeze":
                 c_pred = self.policy.concept_net(features)
+            elif self.method == "gvf":
+                h = batch.get("hidden_states") if self.temporal_encoding == "gru" else None
+                c_pred, _ = self.policy.concept_net(features, h)
+                c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
             else:
                 h = batch.get("hidden_states")
                 c_pred, _, _, _ = self.policy.concept_net(features, h)
@@ -772,7 +937,7 @@ class PPO:
 
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.method == "concept_actor_critic":
+                if self.method in ("concept_actor_critic", "gvf"):
                     actions, h_new = self.policy.predict(obs_t, h_t)
                     if h_new is not None:
                         h_t = h_new
@@ -906,7 +1071,7 @@ class PPO:
         while done_count < n_episodes:
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.method == "concept_actor_critic":
+                if self.method in ("concept_actor_critic", "gvf"):
                     actions, h_new = self.policy.predict(obs_t, h_t, deterministic)
                     if h_new is not None:
                         h_t = h_new
