@@ -11,6 +11,8 @@ Usage:
   python correlation_test.py --n_samples 3000 --seed 42
 """
 
+__test__ = False
+
 import argparse
 import os
 import sys
@@ -57,7 +59,7 @@ def collect_frames_and_concepts(env, n_samples: int, seed: int = 0):
 # Correlation test
 # ---------------------------------------------------------------------------
 
-def test_predictability(frames, concepts, concept_names, n_pca: int = 64):
+def evaluate_predictability(frames, concepts, concept_names, n_pca: int = 64):
     """
     For each concept, fit logistic regression on PCA-reduced pixel features.
     Train on 80%, test on 20%.
@@ -121,7 +123,7 @@ def main():
     print(f"Done. frames: {frames.shape}  concepts: {concepts.shape}\n")
 
     print(f"Fitting logistic regression per concept (PCA n={args.n_pca}, 80/20 split)...")
-    results = test_predictability(
+    results = evaluate_predictability(
         frames, concepts, env.concept_names, n_pca=args.n_pca
     )
 

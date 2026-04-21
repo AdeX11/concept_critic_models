@@ -15,8 +15,11 @@ training_mode controls how concept network parameters interact with policy train
 Label collection is simple random sampling (no active learning).
 """
 
+import os
+import random
 import time
-from typing import List, Optional, Tuple, Union
+from collections import deque
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -25,6 +28,7 @@ import torch.nn.functional as F
 from .buffer import RolloutBuffer
 from .policy import ActorCriticPolicy
 from .networks import ConceptActorCritic
+from runtime_utils import flatten_terminal_info
 
 
 def _obs_to_tensor(obs, device: torch.device):
@@ -73,6 +77,9 @@ class PPO:
         seed: int = 0,
         device: str = "auto",
         verbose: int = 1,
+        eval_env=None,
+        writer=None,
+        benchmark_spec=None,
     ):
         assert method in ("no_concept", "vanilla_freeze", "concept_actor_critic"), (
             f"Unknown method: {method}"
@@ -100,6 +107,9 @@ class PPO:
         self.normalize_advantage = normalize_advantage
         self.seed = seed
         self.verbose = verbose
+        self.eval_env = eval_env
+        self.writer = writer
+        self.benchmark_spec = benchmark_spec
 
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -152,12 +162,18 @@ class PPO:
         # ---- Tracking ----
         self.num_timesteps = 0
         self.episode_rewards: List[List[float]] = [[] for _ in range(self.n_envs)]
-        self.episode_reward_history: List[float] = []
+        self.episode_reward_history: deque = deque(maxlen=10_000)
         # concept_acc_log: list of (timestep, {concept_name: metric})
         self.concept_acc_log: List[Tuple[int, dict]] = []
+        self.eval_log: List[Tuple[int, dict]] = []
         self._last_obs = None
         self._last_episode_starts = np.ones((self.n_envs,), dtype=bool)
         self._last_hidden = torch.zeros(self.n_envs, hidden_dim, device=self.device)
+        self._resume_query_count = 0
+        self._resume_next_query_at = 0
+        self._resume_iteration = 0
+        self._next_eval_at = None
+        self._next_checkpoint_at = None
 
     # ==================================================================
     # learn
@@ -168,6 +184,11 @@ class PPO:
         total_timesteps: int,
         query_num_times: int = 1,
         query_labels_per_time: int = 500,
+        eval_every_timesteps: int = 0,
+        eval_n_episodes: int = 20,
+        checkpoint_dir: Optional[str] = None,
+        checkpoint_every_timesteps: int = 0,
+        run_metadata: Optional[dict] = None,
     ) -> "PPO":
         """
         Main training loop.
@@ -175,18 +196,20 @@ class PPO:
         Concept labels are queried once at the start of training only.
         """
         query_interval = total_timesteps // max(query_num_times, 1)
-        next_query_at  = 0
-        query_count    = 0
+        next_query_at = self._resume_next_query_at if self._resume_next_query_at else 0
+        query_count = self._resume_query_count
 
         obs, _ = self.env.reset()
         self._last_obs = obs
         self._last_episode_starts = np.ones((self.n_envs,), dtype=bool)
-        self._last_hidden = torch.zeros(
-            self.n_envs, self.hidden_dim, device=self.device
-        )
+        self._last_hidden = torch.zeros(self.n_envs, self.hidden_dim, device=self.device)
 
-        iteration = 0
+        iteration = self._resume_iteration
         t_start = time.time()
+        if eval_every_timesteps > 0 and self._next_eval_at is None:
+            self._next_eval_at = max(eval_every_timesteps, self.num_timesteps + eval_every_timesteps)
+        if checkpoint_every_timesteps > 0 and self._next_checkpoint_at is None:
+            self._next_checkpoint_at = max(checkpoint_every_timesteps, self.num_timesteps + checkpoint_every_timesteps)
 
         while self.num_timesteps < total_timesteps:
             # ---- Query concept labels ----
@@ -235,11 +258,13 @@ class PPO:
                 if acc:
                     self.concept_acc_log.append((self.num_timesteps, acc))
                     # Also compute raw MSE per concept for logging
-                    concept_loss_log = self._compute_concept_mse_from_buffer()
+                    # Skip for GRU: random minibatch batches use wrong h_prev, producing misleading values
+                    if self.temporal_encoding != "gru":
+                        concept_loss_log = self._compute_concept_mse_from_buffer()
 
             # ---- Logging ----
             if self.verbose and len(self.episode_reward_history) > 0:
-                recent = self.episode_reward_history[-100:]
+                recent = list(self.episode_reward_history)[-100:]
                 elapsed = time.time() - t_start
                 fps = int(self.num_timesteps / max(elapsed, 1e-6))
                 extra = ""
@@ -264,8 +289,128 @@ class PPO:
                     f"vf_loss={policy_stats.get('vf_loss', 0):.4f}"
                     f"{extra}"
                 )
+            if self.writer is not None and len(self.episode_reward_history) > 0:
+                recent = list(self.episode_reward_history)[-100:]
+                self.writer.add_scalar("train/mean_episode_reward", float(np.mean(recent)), self.num_timesteps)
+                self.writer.add_scalar("train/pg_loss", policy_stats.get("pg_loss", 0.0), self.num_timesteps)
+                self.writer.add_scalar("train/vf_loss", policy_stats.get("vf_loss", 0.0), self.num_timesteps)
+                if concept_ac_stats:
+                    for key, value in concept_ac_stats.items():
+                        self.writer.add_scalar(f"concept/{key}", float(value), self.num_timesteps)
+                if concept_loss_log:
+                    for key, value in concept_loss_log.items():
+                        self.writer.add_scalar(f"concept/mse/{key}", float(value), self.num_timesteps)
+
+            self._resume_query_count = query_count
+            self._resume_next_query_at = next_query_at
+            self._resume_iteration = iteration
+
+            if eval_every_timesteps > 0 and self.eval_env is not None and self._next_eval_at is not None:
+                while self.num_timesteps >= self._next_eval_at:
+                    metrics = self.evaluate_detailed(n_episodes=eval_n_episodes, deterministic=True)
+                    self.eval_log.append((self.num_timesteps, metrics))
+                    if self.writer is not None:
+                        self.writer.add_scalar("eval/mean_reward", metrics["mean_reward"], self.num_timesteps)
+                        self.writer.add_scalar("eval/mean_length", metrics["mean_episode_length"], self.num_timesteps)
+                        if metrics.get("success_rate") is not None:
+                            self.writer.add_scalar("eval/success_rate", metrics["success_rate"], self.num_timesteps)
+                        if metrics.get("normalized_return") is not None:
+                            self.writer.add_scalar("eval/normalized_return", metrics["normalized_return"], self.num_timesteps)
+                    self._next_eval_at += eval_every_timesteps
+
+            if checkpoint_dir and checkpoint_every_timesteps > 0 and self._next_checkpoint_at is not None:
+                while self.num_timesteps >= self._next_checkpoint_at:
+                    self.save_checkpoint(
+                        os.path.join(checkpoint_dir, f"checkpoint_step{self.num_timesteps}.pt"),
+                        run_metadata=run_metadata,
+                    )
+                    self.save_checkpoint(
+                        os.path.join(checkpoint_dir, "latest.pt"),
+                        run_metadata=run_metadata,
+                    )
+                    self._next_checkpoint_at += checkpoint_every_timesteps
 
         return self
+
+    def _capture_rng_state(self) -> dict:
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def _restore_rng_state(self, rng_state: dict) -> None:
+        if not rng_state:
+            return
+        if "python" in rng_state:
+            random.setstate(rng_state["python"])
+        if "numpy" in rng_state:
+            np.random.set_state(rng_state["numpy"])
+        if "torch" in rng_state:
+            torch.set_rng_state(rng_state["torch"])
+        if torch.cuda.is_available() and "torch_cuda" in rng_state:
+            torch.cuda.set_rng_state_all(rng_state["torch_cuda"])
+
+    def checkpoint_state(self, run_metadata: Optional[dict] = None) -> dict:
+        return {
+            "method": self.method,
+            "num_timesteps": self.num_timesteps,
+            "policy_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.policy.optimizer.state_dict(),
+            "optimizer_exclude_concept_state_dict": self.policy.optimizer_exclude_concept.state_dict(),
+            "optimizer_concept_only_state_dict": (
+                self.policy.optimizer_concept_only.state_dict()
+                if self.policy.optimizer_concept_only is not None else None
+            ),
+            "optimizer_concept_and_features_state_dict": (
+                self.policy.optimizer_concept_and_features.state_dict()
+                if self.policy.optimizer_concept_and_features is not None else None
+            ),
+            "episode_reward_history": list(self.episode_reward_history),
+            "concept_acc_log": self.concept_acc_log,
+            "eval_log": self.eval_log,
+            "resume_state": {
+                "query_count": self._resume_query_count,
+                "next_query_at": self._resume_next_query_at,
+                "iteration": self._resume_iteration,
+                "next_eval_at": self._next_eval_at,
+                "next_checkpoint_at": self._next_checkpoint_at,
+            },
+            "rng_state": self._capture_rng_state(),
+            "metadata": run_metadata or {},
+        }
+
+    def load_checkpoint_state(self, state: dict) -> None:
+        self.policy.load_state_dict(state["policy_state_dict"])
+        self.policy.optimizer.load_state_dict(state["optimizer_state_dict"])
+        self.policy.optimizer_exclude_concept.load_state_dict(state["optimizer_exclude_concept_state_dict"])
+        if self.policy.optimizer_concept_only is not None and state.get("optimizer_concept_only_state_dict") is not None:
+            self.policy.optimizer_concept_only.load_state_dict(state["optimizer_concept_only_state_dict"])
+        if (
+            self.policy.optimizer_concept_and_features is not None
+            and state.get("optimizer_concept_and_features_state_dict") is not None
+        ):
+            self.policy.optimizer_concept_and_features.load_state_dict(
+                state["optimizer_concept_and_features_state_dict"]
+            )
+        self.num_timesteps = int(state.get("num_timesteps", 0))
+        self.episode_reward_history = deque(state.get("episode_reward_history", []), maxlen=10_000)
+        self.concept_acc_log = list(state.get("concept_acc_log", []))
+        self.eval_log = list(state.get("eval_log", []))
+        resume_state = state.get("resume_state", {})
+        self._resume_query_count = int(resume_state.get("query_count", 0))
+        self._resume_next_query_at = int(resume_state.get("next_query_at", 0))
+        self._resume_iteration = int(resume_state.get("iteration", 0))
+        self._next_eval_at = resume_state.get("next_eval_at")
+        self._next_checkpoint_at = resume_state.get("next_checkpoint_at")
+        self._restore_rng_state(state.get("rng_state", {}))
+
+    def save_checkpoint(self, path: str, run_metadata: Optional[dict] = None) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.checkpoint_state(run_metadata=run_metadata), path)
 
     # ==================================================================
     # collect_rollouts
@@ -297,9 +442,11 @@ class PPO:
                         h_t = h_t * (1.0 - reset_mask)
                     # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
                     h_prev_for_buffer = h_t.clone()
-                    # Full forward pass
+
+                    # Fix #1: forward WITHOUT actions — V_c cannot be computed yet because
+                    # the action has not been sampled.  concept_net returns V_c=None here.
                     features = self.policy.extract_features(obs_tensor)
-                    c_t, h_new, concept_dists, V_c = self.policy.concept_net(
+                    c_t, h_new, concept_dists, _ = self.policy.concept_net(
                         features, h_t
                     )
                     latent = self.policy.mlp_extractor(c_t)
@@ -309,11 +456,32 @@ class PPO:
                     log_probs = dist.log_prob(actions)
                     values    = self.policy.value_net(latent).flatten()
 
-                    concept_log_prob = (
-                        self.policy.concept_net.concept_log_probs(concept_dists, c_t)
-                        .cpu().numpy()
+                    # Sample concept actions from concept distributions.
+                    # These samples are the "actions" for the concept PPO ratio:
+                    # both old_log_prob (stored now) and new_log_prob (at training time)
+                    # are evaluated at these same samples, ensuring a valid importance
+                    # ratio.  The policy MLP still receives the argmax STE vector c_t.
+                    concept_actions_sampled = (
+                        self.policy.concept_net.sample_concept_actions(concept_dists)
                     )
-                    concept_value = V_c
+                    concept_log_prob = (
+                        self.policy.concept_net.concept_log_probs(
+                            concept_dists, concept_actions_sampled
+                        ).cpu().numpy()
+                    )
+
+                    # Fix #1: now that the action is sampled, compute Q_c(h_t, a_t).
+                    # For 'gru', h_new IS the GRU output (head_input).
+                    # For 'stacked'/'none', h_new is None so we use CNN features.
+                    # This Q_c is stored as concept_value in the buffer and used by GAE
+                    # in compute_concept_returns_and_advantage — the Bellman backup
+                    # treats Q_c(s_t, a_t) identically to a state-value in the TD error.
+                    head_input = h_new if h_new is not None else features
+                    action_oh  = F.one_hot(actions, self.policy.n_actions).float()
+                    concept_value = self.policy.concept_net.compute_concept_value_from_head(
+                        head_input, action_oh
+                    )
+
                     if h_new is not None:
                         h_t = h_new
                 else:
@@ -327,11 +495,16 @@ class PPO:
             # Collect ground-truth concepts for CURRENT observation (before stepping)
             concepts = self._get_current_concepts()
 
-            # Compute concept accuracy reward
+            # Compute concept accuracy reward from the SAMPLED concept actions
+            # (not the argmax policy vector c_t).  This ensures the reward, the
+            # advantage derived from it, and the PPO ratio all refer to the same
+            # concept action — a consistency requirement for valid policy gradient.
             concept_reward = None
-            if self.method == "concept_actor_critic" and c_t is not None:
+            concept_action_np = None
+            if self.method == "concept_actor_critic" and concept_actions_sampled is not None:
+                concept_action_np = concept_actions_sampled.cpu().numpy()
                 concept_reward = self._compute_concept_reward(
-                    c_t.cpu().numpy(), concepts
+                    concept_action_np, concepts
                 )
 
             # Step environment
@@ -359,11 +532,15 @@ class PPO:
                 log_prob=log_probs,
                 hidden_state=(
                     h_prev_for_buffer.cpu().numpy()
-                    if self.temporal_encoding == "gru" else None
+                    if (
+                        self.method == "concept_actor_critic"
+                        and self.temporal_encoding == "gru"
+                    ) else None
                 ),
                 concept_value=concept_value,
                 concept_log_prob=concept_log_prob,
                 concept_reward=concept_reward,
+                concept_action=concept_action_np,
             )
 
             self.num_timesteps += self.n_envs
@@ -390,10 +567,24 @@ class PPO:
                 ).unsqueeze(1)
                 h_t_final = h_t * (1.0 - reset_mask)
                 features = self.policy.extract_features(obs_tensor)
-                c_t, _, _, V_c_last = self.policy.concept_net(features, h_t_final)
+                # Forward without actions to get c_t and h_last for policy/value heads.
+                c_t, h_last, _, _ = self.policy.concept_net(features, h_t_final)
                 latent = self.policy.mlp_extractor(c_t)
                 last_values = self.policy.value_net(latent).flatten()
-                last_concept_values = V_c_last.flatten()
+
+                # Bootstrap concept value Q_c(s_T, a_T) at the rollout boundary.
+                # Sample from the current policy (not argmax) to stay on-policy,
+                # consistent with how Q_c is computed at every other step in the
+                # rollout.  A greedy argmax here would mix a Q-learning-style backup
+                # into an otherwise SARSA-like on-policy target.
+                terminal_action = torch.distributions.Categorical(
+                    logits=self.policy.action_net(latent)
+                ).sample()
+                terminal_oh     = F.one_hot(terminal_action, self.policy.n_actions).float()
+                head_input_last = h_last if h_last is not None else features
+                last_concept_values = self.policy.concept_net.compute_concept_value_from_head(
+                    head_input_last, terminal_oh
+                ).flatten()
             else:
                 _, last_values, _, _ = self.policy.forward(obs_tensor)
                 last_concept_values = torch.zeros(self.n_envs, device=self.device)
@@ -505,13 +696,21 @@ class PPO:
 
         actor_losses, critic_losses, ent_losses = [], [], []
 
-        for _ in range(50):
+        for _ in range(self.n_epochs):
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs    = batch["observations"]
                 h_prev = batch["hidden_states"]
 
                 features = self.policy.extract_features(obs)
-                c_pred, _, concept_dists, V_c = concept_net(features, h_prev)
+                # Fix #1: pass stored actions so concept_net computes Q_c(h_t, a_t)
+                # in one forward pass.  batch["actions"] is the action taken at this
+                # timestep, stored by collect_rollouts — the same action used when
+                # concept_value was computed during rollout, ensuring the Bellman
+                # target concept_returns was computed under the same (s, a) pair.
+                stored_actions = batch["actions"].long().flatten()
+                c_pred, _, concept_dists, V_c = concept_net(
+                    features, h_prev, actions=stored_actions
+                )
 
                 # ---- Concept actor loss (PPO-clipped) ----
                 c_adv = batch["concept_advantages"]
@@ -519,7 +718,13 @@ class PPO:
                     c_adv = (c_adv - c_adv.mean()) / (c_adv.std() + 1e-8)
 
                 old_clp = batch["concept_log_probs"]
-                new_clp = concept_net.concept_log_probs(concept_dists, c_pred)
+                # Evaluate new log-prob at the STORED sampled concept actions,
+                # NOT at the current argmax c_pred.  This ensures old_clp and
+                # new_clp refer to the same action, making the importance ratio
+                # π_new(a_stored) / π_old(a_stored) valid for PPO clipping.
+                new_clp = concept_net.concept_log_probs(
+                    concept_dists, batch["concept_actions"]
+                )
                 ratio   = torch.exp(new_clp - old_clp)
 
                 ac_loss1 = c_adv * ratio
@@ -686,6 +891,11 @@ class PPO:
 
                     features = self.policy.extract_features(obs_t)
                     c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
+                    # Decode one-hot policy vector → [N, n_concepts] for metrics.
+                    # This is a logging/eval caller — uses decode_concept_vector,
+                    # not stored concept_actions.
+                    if hasattr(self.policy.concept_net, 'decode_concept_vector'):
+                        c_pred = self.policy.concept_net.decode_concept_vector(c_pred)
                     all_pred.append(c_pred.cpu())
                     all_true.append(
                         torch.as_tensor(buf.concepts[step], dtype=torch.float32)
@@ -703,6 +913,9 @@ class PPO:
                     c_pred = self.policy.concept_net(features)
                 else:
                     c_pred, _, _, _ = self.policy.concept_net(features, None)
+                    # Decode one-hot → [B, n_concepts] for logging/eval.
+                    if hasattr(self.policy.concept_net, 'decode_concept_vector'):
+                        c_pred = self.policy.concept_net.decode_concept_vector(c_pred)
                 c_pred_np = c_pred.cpu().numpy()
                 c_true_np = c_true.cpu().numpy()
 
@@ -734,6 +947,9 @@ class PPO:
             else:
                 h = batch.get("hidden_states")
                 c_pred, _, _, _ = self.policy.concept_net(features, h)
+                # Decode one-hot → [B, n_concepts] for logging/eval.
+                if hasattr(self.policy.concept_net, 'decode_concept_vector'):
+                    c_pred = self.policy.concept_net.decode_concept_vector(c_pred)
             c_pred_np = c_pred.cpu().numpy()
             c_true_np = c_true.cpu().numpy()
         self.policy.set_training_mode(True)
@@ -890,15 +1106,14 @@ class PPO:
     # evaluation helpers
     # ==================================================================
 
-    def evaluate(
-        self, n_episodes: int = 20, deterministic: bool = True
+    def _evaluate_vector_env(
+        self,
+        n_episodes: int,
+        deterministic: bool,
     ) -> Tuple[float, float]:
-        """Run n_episodes in env, return (mean_reward, std_reward)."""
         rewards = []
         obs, _ = self.env.reset()
-        h_t = torch.zeros(
-            self.n_envs, self.hidden_dim, device=self.device
-        )
+        h_t = torch.zeros(self.n_envs, self.hidden_dim, device=self.device)
         ep_rewards = [0.0] * self.n_envs
         done_count = 0
         self.policy.set_training_mode(False)
@@ -925,3 +1140,99 @@ class PPO:
                         h_t[i] = 0.0
 
         return float(np.mean(rewards)), float(np.std(rewards))
+
+    def evaluate_detailed(
+        self,
+        n_episodes: int = 20,
+        deterministic: bool = True,
+    ) -> Dict[str, object]:
+        """Run deterministic evaluation on the single-env evaluation environment."""
+        if self.eval_env is None:
+            mean_reward, std_reward = self._evaluate_vector_env(
+                n_episodes=n_episodes, deterministic=deterministic
+            )
+            return {
+                "mean_reward": mean_reward,
+                "std_reward": std_reward,
+                "success_rate": None,
+                "mean_episode_length": None,
+                "normalized_return": None,
+                "terminal_info_counts": {},
+            }
+
+        rewards: List[float] = []
+        lengths: List[int] = []
+        success_values: List[float] = []
+        terminal_info_counts: Dict[str, Dict[str, int]] = {}
+        self.policy.set_training_mode(False)
+
+        for ep in range(n_episodes):
+            obs, _ = self.eval_env.reset(seed=self.seed + ep)
+            h_t = (
+                torch.zeros(1, self.hidden_dim, device=self.device)
+                if self.method == "concept_actor_critic" and self.temporal_encoding == "gru"
+                else None
+            )
+            ep_reward = 0.0
+            ep_length = 0
+            done = False
+
+            while not done:
+                if isinstance(obs, dict):
+                    obs_t = {
+                        k: torch.as_tensor(np.expand_dims(v, 0), dtype=torch.float32).to(self.device)
+                        for k, v in obs.items()
+                    }
+                else:
+                    obs_t = torch.as_tensor(np.expand_dims(obs, 0), dtype=torch.float32).to(self.device)
+                with torch.no_grad():
+                    if self.method == "concept_actor_critic":
+                        action, h_new = self.policy.predict(obs_t, h_t, deterministic)
+                        if h_new is not None:
+                            h_t = h_new
+                    else:
+                        action, _ = self.policy.predict(obs_t, deterministic=deterministic)
+                action_np = int(action.item())
+                obs, reward, terminated, truncated, info = self.eval_env.step(action_np)
+                ep_reward += float(reward)
+                ep_length += 1
+                done = bool(terminated or truncated)
+                if done:
+                    info = flatten_terminal_info(dict(info))
+                    if "success" in info:
+                        success_values.append(float(bool(info["success"])))
+                    for key, value in info.items():
+                        value_key = str(value)
+                        terminal_info_counts.setdefault(key, {})
+                        terminal_info_counts[key][value_key] = terminal_info_counts[key].get(value_key, 0) + 1
+
+            rewards.append(ep_reward)
+            lengths.append(ep_length)
+
+        mean_reward = float(np.mean(rewards))
+        std_reward = float(np.std(rewards))
+        success_rate = float(np.mean(success_values)) if success_values else None
+        normalized_return = None
+        if self.benchmark_spec is not None:
+            reactive = getattr(self.benchmark_spec, "reactive_reference", None)
+            oracle = getattr(self.benchmark_spec, "oracle_reference", None)
+            if reactive is not None and oracle is not None and abs(oracle - reactive) > 1e-8:
+                normalized_return = float(np.clip((mean_reward - reactive) / (oracle - reactive), 0.0, 1.0))
+        return {
+            "mean_reward": mean_reward,
+            "std_reward": std_reward,
+            "success_rate": success_rate,
+            "mean_episode_length": float(np.mean(lengths)),
+            "normalized_return": normalized_return,
+            "terminal_info_counts": terminal_info_counts,
+            "episode_rewards": rewards,
+            "episode_lengths": lengths,
+        }
+
+    def evaluate(
+        self, n_episodes: int = 20, deterministic: bool = True
+    ) -> Tuple[float, float]:
+        if self.eval_env is None:
+            return self._evaluate_vector_env(n_episodes=n_episodes, deterministic=deterministic)
+        metrics = self.evaluate_detailed(n_episodes=n_episodes, deterministic=deterministic)
+        return float(metrics["mean_reward"]), float(metrics["std_reward"])

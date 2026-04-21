@@ -86,9 +86,13 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
             "movable_right", "movable_down", "movable_left", "movable_up",
             "obstacle1_move_direction", "obstacle2_move_direction",
         ]
-        # Truly temporal (invisible from single frame): obstacle move directions
-        # Also temporal but partially visible: direction, movable flags
-        self.temporal_concepts = [2, 7, 8, 9, 10, 11, 12]
+        # Temporal concepts: only those whose ground truth requires comparing
+        # two consecutive frames (Δposition across timesteps).
+        # All other concepts — positions, direction, movable flags — are deterministic
+        # functions of the current grid state and are therefore static, even if some
+        # are hard to predict from low-resolution pixel features.
+        # obstacle1_move_direction (idx 11), obstacle2_move_direction (idx 12).
+        self.temporal_concepts = [11, 12]
 
         self.current_concept: Optional[np.ndarray] = None
         self._prev_obstacle_positions: Optional[list] = None
@@ -97,7 +101,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
     # ------------------------------------------------------------------
 
     def get_concept(self) -> np.ndarray:
-        return self.current_concept.copy() if self.current_concept is not None else np.zeros(11, dtype=np.float32)
+        return self.current_concept.copy() if self.current_concept is not None else np.zeros(len(self.task_types), dtype=np.float32)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -133,7 +137,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
              curr_positions[i][1] - prev_positions[i][1])
             for i in range(2)
         ]
-        self.current_concept = self._compute_concept()
+        self.current_concept = self._compute_concept(obstacle_positions=curr_positions)
         if done or truncated:
             info["terminal_observation"] = stacked
         info["concept"] = self.current_concept.copy()
@@ -170,7 +174,7 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
         img = cv2.resize(img, (self.COLS, self.ROWS))
         return img.transpose(2, 0, 1)  # [3, H, W]
 
-    def _compute_concept(self) -> np.ndarray:
+    def _compute_concept(self, obstacle_positions: Optional[list] = None) -> np.ndarray:
         unwrapped = self.env.unwrapped
         agent_pos = unwrapped.agent_pos
         agent_dir = unwrapped.agent_dir
@@ -189,7 +193,8 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
                 return cell is None or (hasattr(cell, "can_overlap") and cell.can_overlap())
             return False
 
-        obstacle_positions = self._get_obstacle_positions()
+        if obstacle_positions is None:
+            obstacle_positions = self._get_obstacle_positions()
 
         movable = [
             int(can_move(agent_pos, 0)),  # right

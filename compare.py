@@ -29,11 +29,10 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from envs.cartpole          import make_cartpole_env,           make_single_cartpole_env
-from envs.dynamic_obstacles import make_dynamic_obstacles_env,  make_single_dynamic_obstacles_env
-from envs.lunar_lander      import (make_lunar_lander_env,      make_single_lunar_lander_env,
-                                     make_lunar_lander_state_env, make_single_lunar_lander_state_env)
+from benchmark_registry import compute_normalized_return, get_benchmark_spec, list_benchmark_ids
+from envs.registry import list_env_names, make_env_pair
 from ppo.ppo                import PPO
+from runtime_utils import get_obs_shape, write_json
 
 
 METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic"]
@@ -59,29 +58,8 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def get_obs_shape(env):
-    obs_space = env.observation_space
-    if hasattr(obs_space, "spaces"):
-        return {k: v.shape for k, v in obs_space.spaces.items()}
-    return obs_space.shape
-
-
-def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 1):
-    if env_name == "cartpole":
-        vec_env    = make_cartpole_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_cartpole_env(seed, n_stack=n_stack)
-    elif env_name == "dynamic_obstacles":
-        vec_env    = make_dynamic_obstacles_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_dynamic_obstacles_env(seed, n_stack=n_stack)
-    elif env_name == "lunar_lander":
-        vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
-    elif env_name == "lunar_lander_state":
-        vec_env    = make_lunar_lander_state_env(n_envs, seed)
-        single_env = make_single_lunar_lander_state_env(seed)
-    else:
-        raise ValueError(f"Unknown env: {env_name}")
-
+def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, temporal_encoding: str = "none"):
+    vec_env, single_env, _ = make_env_pair(env_name, n_envs, seed, temporal_encoding=temporal_encoding)
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
         n_actions     = vec_env.single_action_space.n,
@@ -104,6 +82,7 @@ def smooth(values: np.ndarray, window: int = 20) -> np.ndarray:
 
 def run_single(
     method: str,
+    benchmark_id: str,
     env_name: str,
     seed: int,
     total_timesteps: int,
@@ -119,9 +98,8 @@ def run_single(
 ) -> dict:
     """Train one method/seed and return metrics dict."""
     set_seed(seed)
-    n_stack = 4 if temporal_encoding == "stacked" else 1
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
-        env_name, n_envs, seed, n_stack=n_stack
+        env_name, n_envs, seed, temporal_encoding=temporal_encoding
     )
     dev = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     policy_kwargs["device"] = dev
@@ -148,6 +126,8 @@ def run_single(
         seed          = seed,
         device        = device,
         verbose       = 1,
+        eval_env      = single_env,
+        benchmark_spec = get_benchmark_spec(benchmark_id) if benchmark_id in list_benchmark_ids() else None,
     )
 
     labels_per_query = max(1, num_labels // max(query_num_times, 1))
@@ -157,7 +137,8 @@ def run_single(
         query_labels_per_time = labels_per_query,
     )
 
-    mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)
+    eval_metrics = model.evaluate_detailed(n_episodes=20, deterministic=True)
+    mean_r, std_r = eval_metrics["mean_reward"], eval_metrics["std_reward"]
 
     # ---- Save model ----
     model_path = os.path.join(out_dir, f"{method}_seed{seed}_model.pt")
@@ -174,6 +155,9 @@ def run_single(
         "rewards":           np.array(model.episode_reward_history, dtype=np.float32),
         "mean_reward":       mean_r,
         "std_reward":        std_r,
+        "success_rate":      eval_metrics.get("success_rate"),
+        "normalized_return": compute_normalized_return(benchmark_id, mean_r) if benchmark_id in list_benchmark_ids() else None,
+        "eval_metrics":      eval_metrics,
         "concept_acc_log":   model.concept_acc_log,   # [(timestep, {name: metric})]
         "task_types":        task_types,
         "concept_names":     concept_names,
@@ -236,6 +220,11 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
                 action = action_logits.argmax(dim=1)
 
         if c_t is not None:
+            # For concept_actor_critic, c_t is [1, policy_dim] (one-hot).
+            # Decode back to [1, n_concepts] for per-concept metric comparison.
+            if (model.method == "concept_actor_critic"
+                    and hasattr(model.policy.concept_net, 'decode_concept_vector')):
+                c_t = model.policy.concept_net.decode_concept_vector(c_t)
             c_np = c_t.cpu().numpy().flatten()
             for i in range(n_concepts):
                 all_preds[i].append(c_np[i])
@@ -471,32 +460,45 @@ def write_summary_table(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare three RL methods on a single environment.")
-    parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state"])
+    parser.add_argument("--benchmark", default=None, choices=list_benchmark_ids())
+    parser.add_argument("--env", default=None, choices=list_env_names())
     parser.add_argument("--methods", nargs="+", default=METHODS,
                         choices=METHODS, help="Subset of methods to compare")
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic")
     parser.add_argument("--training_mode", type=str, default="two_phase",
-                        choices=["two_phase", "end_to_end"],
-                        help="'two_phase': concept net frozen during PPO; 'end_to_end': joint training")
+                        choices=["two_phase", "end_to_end", "joint"],
+                        help="'two_phase': concept net frozen during PPO; 'end_to_end' and 'joint' allow gradients through the concept module")
     parser.add_argument("--seeds",   nargs="+", type=int, default=[42])
-    parser.add_argument("--total_timesteps", type=int, default=500_000)
-    parser.add_argument("--num_labels",      type=int, default=500)
-    parser.add_argument("--query_num_times", type=int, default=2)
+    parser.add_argument("--total_timesteps", type=int, default=None)
+    parser.add_argument("--num_labels",      type=int, default=None)
+    parser.add_argument("--query_num_times", type=int, default=None)
     parser.add_argument("--n_envs",          type=int, default=4)
     parser.add_argument("--n_steps",         type=int, default=512)
     parser.add_argument("--batch_size",      type=int, default=256)
     parser.add_argument("--device",          type=str, default="auto")
-    parser.add_argument("--output_dir",      type=str, default="/glade/derecho/scratch/adadelek/compare_results",
+    parser.add_argument("--output_dir",      type=str, default="compare_results",
                         help="Directory for heavy outputs (rollout .npy files, config)")
     parser.add_argument("--plots_dir",       type=str, default="compare_plots",
                         help="Directory for visualization outputs (.png, summary table)")
     args = parser.parse_args()
 
+    benchmark_id = args.benchmark or args.env
+    if benchmark_id is None:
+        raise ValueError("One of --benchmark or --env is required")
+    benchmark_spec = get_benchmark_spec(benchmark_id) if args.benchmark else None
+    args.env = benchmark_spec.env_name if benchmark_spec is not None else benchmark_id
+    args.benchmark_id = benchmark_id
+    if args.total_timesteps is None:
+        args.total_timesteps = benchmark_spec.canonical_total_timesteps if benchmark_spec is not None else 500_000
+    if args.num_labels is None:
+        args.num_labels = benchmark_spec.canonical_num_labels if benchmark_spec is not None else 500
+    if args.query_num_times is None:
+        args.query_num_times = benchmark_spec.canonical_query_num_times if benchmark_spec is not None else 2
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_tag = f"{args.env}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
+    run_tag = f"{benchmark_id}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
     out_dir = os.path.join(args.output_dir, run_tag)
     plots_dir = os.path.join(args.plots_dir, run_tag)
     os.makedirs(out_dir, exist_ok=True)
@@ -520,6 +522,7 @@ def main() -> None:
             t0 = time.time()
             try:
                 res = run_single(
+                    benchmark_id        = benchmark_id,
                     method             = method,
                     env_name           = args.env,
                     seed               = seed,
@@ -544,6 +547,10 @@ def main() -> None:
                 np.save(
                     os.path.join(out_dir, f"{method}_seed{seed}_rewards.npy"),
                     res["rewards"],
+                )
+                write_json(
+                    os.path.join(out_dir, f"{method}_seed{seed}_eval.json"),
+                    res["eval_metrics"],
                 )
             except Exception as e:
                 print(f"[compare] ERROR in {method} seed={seed}: {e}")

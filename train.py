@@ -24,13 +24,10 @@ import torch
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from envs.cartpole        import make_cartpole_env,          make_single_cartpole_env
-from envs.dynamic_obstacles import make_dynamic_obstacles_env, make_single_dynamic_obstacles_env
-from envs.lunar_lander    import (make_lunar_lander_env,           make_single_lunar_lander_env,
-                                   make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
-                                   make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
-from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
+from benchmark_registry import get_benchmark_spec, list_benchmark_ids
+from envs.registry import list_env_names, make_env_pair
 from ppo.ppo              import PPO
+from runtime_utils import get_obs_shape, make_summary_writer, write_json
 
 
 # ---------------------------------------------------------------------------
@@ -45,40 +42,8 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def get_obs_shape(env):
-    obs_space = env.observation_space
-    if hasattr(obs_space, "spaces"):
-        return {k: v.shape for k, v in obs_space.spaces.items()}
-    return obs_space.shape
-
-
-def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 4):
-    """
-    Returns (vec_env, single_env, policy_kwargs_base).
-    policy_kwargs_base contains obs_shape, n_actions, task_types, num_classes, concept_dim.
-    n_stack=4 for 'stacked' temporal encoding, n_stack=1 for 'gru' or 'none'.
-    """
-    if env_name == "cartpole":
-        vec_env    = make_cartpole_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_cartpole_env(seed, n_stack=n_stack)
-    elif env_name == "dynamic_obstacles":
-        vec_env    = make_dynamic_obstacles_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_dynamic_obstacles_env(seed, n_stack=n_stack)
-    elif env_name == "lunar_lander":
-        vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
-    elif env_name == "lunar_lander_state":
-        vec_env    = make_lunar_lander_state_env(n_envs, seed)
-        single_env = make_single_lunar_lander_state_env(seed)
-    elif env_name == "lunar_lander_pos_only":
-        vec_env    = make_lunar_lander_pos_only_env(n_envs, seed)
-        single_env = make_single_lunar_lander_pos_only_env(seed)
-    elif env_name == "mountain_car":
-        vec_env    = make_mountain_car_env(n_envs, seed)
-        single_env = make_single_mountain_car_env(seed)
-    else:
-        raise ValueError(f"Unknown env: {env_name}")
-
+def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, temporal_encoding: str = "none"):
+    vec_env, single_env, _ = make_env_pair(env_name, n_envs, seed, temporal_encoding=temporal_encoding)
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
         n_actions     = vec_env.single_action_space.n,
@@ -100,10 +65,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train RL agent with optional concept bottleneck.")
     parser.add_argument("--method", required=True,
                         choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
-    parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only",
-                                 "mountain_car"])
+    parser.add_argument("--benchmark", default=None, choices=list_benchmark_ids())
+    parser.add_argument("--env", default=None, choices=list_env_names())
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "
@@ -114,10 +77,10 @@ def main() -> None:
                         help="'two_phase': concept net frozen during PPO update (LICORICE-style); "
                              "'end_to_end': policy gradient flows through concept net jointly")
     parser.add_argument("--seed",              type=int,   default=42)
-    parser.add_argument("--total_timesteps",   type=int,   default=1_000_000)
-    parser.add_argument("--num_labels",        type=int,   default=500,
+    parser.add_argument("--total_timesteps",   type=int,   default=None)
+    parser.add_argument("--num_labels",        type=int,   default=None,
                         help="Total labeled samples across all queries")
-    parser.add_argument("--query_num_times",   type=int,   default=1,
+    parser.add_argument("--query_num_times",   type=int,   default=None,
                         help="How many times to query labels during training")
     parser.add_argument("--n_envs",            type=int,   default=4)
     parser.add_argument("--n_steps",           type=int,   default=512)
@@ -131,26 +94,63 @@ def main() -> None:
     parser.add_argument("--lambda_s",          type=float, default=0.5,
                         help="Supervised anchor loss weight (concept_actor_critic only)")
     parser.add_argument("--device",            type=str,   default="auto")
-    parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
+    parser.add_argument("--output_dir",        type=str,   default="results")
+    parser.add_argument("--resume_from",       type=str,   default=None)
+    parser.add_argument("--checkpoint_every_timesteps", type=int, default=50_000)
+    parser.add_argument("--eval_every_timesteps", type=int, default=50_000)
+    parser.add_argument("--eval_episodes",     type=int,   default=20)
     args = parser.parse_args()
+
+    benchmark_id = args.benchmark or args.env
+    if benchmark_id is None:
+        raise ValueError("One of --benchmark or --env is required")
+    benchmark_spec = get_benchmark_spec(benchmark_id) if args.benchmark else None
+    env_name = benchmark_spec.env_name if benchmark_spec is not None else benchmark_id
+
+    if args.total_timesteps is None:
+        args.total_timesteps = benchmark_spec.canonical_total_timesteps if benchmark_spec is not None else 1_000_000
+    if args.num_labels is None:
+        args.num_labels = benchmark_spec.canonical_num_labels if benchmark_spec is not None else 500
+    if args.query_num_times is None:
+        args.query_num_times = benchmark_spec.canonical_query_num_times if benchmark_spec is not None else 1
 
     set_seed(args.seed)
 
     out_dir = os.path.join(
         args.output_dir,
-        f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{args.env}_seed{args.seed}"
+        f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{benchmark_id}_seed{args.seed}"
     )
     os.makedirs(out_dir, exist_ok=True)
+    checkpoint_dir = os.path.join(out_dir, "checkpoints")
+    writer = make_summary_writer(os.path.join(out_dir, "tb"))
+    run_metadata = {
+        "benchmark_id": benchmark_id,
+        "env_name": env_name,
+        "seed": args.seed,
+        "method": args.method,
+        "temporal_encoding": args.temporal_encoding,
+        "training_mode": args.training_mode,
+        "total_timesteps": args.total_timesteps,
+        "num_labels": args.num_labels,
+        "query_num_times": args.query_num_times,
+        "n_envs": args.n_envs,
+        "n_steps": args.n_steps,
+        "n_epochs": args.n_epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "ent_coef": args.ent_coef,
+        "vf_coef": args.vf_coef,
+        "lambda_v": args.lambda_v,
+        "lambda_s": args.lambda_s,
+    }
+    write_json(os.path.join(out_dir, "metadata.json"), run_metadata)
     print(f"[train] method={args.method}  training_mode={args.training_mode}  "
-          f"temporal_encoding={args.temporal_encoding}  env={args.env}  seed={args.seed}")
+          f"temporal_encoding={args.temporal_encoding}  benchmark={benchmark_id}  seed={args.seed}")
     print(f"[train] output → {out_dir}")
-
-    # n_stack=4 for frame-stacking temporal encoding, else 1
-    n_stack = 4 if args.temporal_encoding == "stacked" else 1
 
     # ---- Environment ----
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
-        args.env, args.n_envs, args.seed, n_stack=n_stack
+        env_name, args.n_envs, args.seed, temporal_encoding=args.temporal_encoding
     )
     policy_kwargs["device"] = args.device if args.device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -179,7 +179,14 @@ def main() -> None:
         seed           = args.seed,
         device         = args.device,
         verbose        = 1,
+        eval_env       = single_env,
+        writer         = writer,
+        benchmark_spec = benchmark_spec,
     )
+
+    if args.resume_from:
+        checkpoint = torch.load(args.resume_from, map_location=model.device)
+        model.load_checkpoint_state(checkpoint)
 
     labels_per_query = max(1, args.num_labels // max(args.query_num_times, 1))
 
@@ -187,6 +194,11 @@ def main() -> None:
         total_timesteps   = args.total_timesteps,
         query_num_times   = args.query_num_times if args.method != "no_concept" else 0,
         query_labels_per_time = labels_per_query,
+        eval_every_timesteps = args.eval_every_timesteps,
+        eval_n_episodes      = args.eval_episodes,
+        checkpoint_dir       = checkpoint_dir,
+        checkpoint_every_timesteps = args.checkpoint_every_timesteps,
+        run_metadata         = run_metadata,
     )
 
     # ---- Save ----
@@ -208,15 +220,27 @@ def main() -> None:
         print(f"[train] saved concept accuracy log → {out_dir}/concept_acc.npz")
 
     # ---- Quick evaluation ----
-    mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)
+    final_eval = model.evaluate_detailed(n_episodes=args.eval_episodes, deterministic=True)
+    mean_r, std_r = final_eval["mean_reward"], final_eval["std_reward"]
     print(f"[train] eval: mean_reward={mean_r:.2f} ± {std_r:.2f}")
 
     # Save eval result
     with open(os.path.join(out_dir, "eval.txt"), "w") as f:
         f.write(f"mean_reward={mean_r:.4f}\nstd_reward={std_r:.4f}\n")
+        if final_eval.get("success_rate") is not None:
+            f.write(f"success_rate={final_eval['success_rate']:.4f}\n")
+        if final_eval.get("normalized_return") is not None:
+            f.write(f"normalized_return={final_eval['normalized_return']:.4f}\n")
+    write_json(os.path.join(out_dir, "eval.json"), final_eval)
+    if model.eval_log:
+        write_json(
+            os.path.join(out_dir, "eval_checkpoints.json"),
+            {"eval_log": [{"timesteps": t, "metrics": m} for t, m in model.eval_log]},
+        )
 
     vec_env.close()
     single_env.close()
+    writer.close()
     print("[train] done.")
 
 

@@ -79,6 +79,11 @@ class RolloutBuffer:
         self.concept_values  = np.zeros((T, N),                   dtype=np.float32)
         self.concept_log_probs = np.zeros((T, N),                 dtype=np.float32)
         self.concept_rewards = np.zeros((T, N),                   dtype=np.float32)
+        # Sampled concept actions: the concept prediction actually used for the PPO
+        # ratio.  Stored as float for buffer uniformity; classification entries must
+        # be cast to long at Categorical.log_prob() call sites.  Shape [T,N,concept_dim]
+        # where each column is one concept's sampled action (integer for cls, float for reg).
+        self.concept_actions = np.zeros((T, N, self.concept_dim), dtype=np.float32)
         self.actions         = np.zeros((T, N, self.action_dim),  dtype=np.float32)
         self.rewards         = np.zeros((T, N),                   dtype=np.float32)
         self.values          = np.zeros((T, N),                   dtype=np.float32)
@@ -114,6 +119,7 @@ class RolloutBuffer:
         concept_value: Optional[torch.Tensor] = None,
         concept_log_prob: Optional[np.ndarray] = None,
         concept_reward: Optional[np.ndarray] = None,
+        concept_action: Optional[np.ndarray] = None,
     ) -> None:
         t = self.pos
         N = self.n_envs
@@ -139,6 +145,8 @@ class RolloutBuffer:
             self.concept_log_probs[t] = np.array(concept_log_prob).reshape(N)
         if concept_reward is not None:
             self.concept_rewards[t] = np.array(concept_reward).reshape(N)
+        if concept_action is not None:
+            self.concept_actions[t] = np.array(concept_action).reshape(N, self.concept_dim)
 
         self.pos += 1
         if self.pos == self.buffer_size:
@@ -267,6 +275,7 @@ class RolloutBuffer:
             "concept_values",
             "concept_log_probs",
             "concept_rewards",
+            "concept_actions",
             "concept_advantages",
             "concept_returns",
             "episode_starts",
@@ -297,6 +306,7 @@ class RolloutBuffer:
             "concept_values",
             "concept_log_probs",
             "concept_rewards",
+            "concept_actions",
             "concept_advantages",
             "concept_returns",
         ]:

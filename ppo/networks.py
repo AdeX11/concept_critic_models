@@ -134,8 +134,7 @@ class ConceptActorCritic(nn.Module):
 
     temporal_encoding controls how temporal information enters:
       'gru'     — GRUCell(feature_dim, hidden_dim=256); heads operate on h_t
-      'stacked' — no GRU; heads operate directly on features [B, feature_dim]
-                  temporal info comes from frame-stacked observations (env-level)
+      'stacked' — no GRU; temporal info comes from frame-stacked observations (env-level)
       'none'    — no GRU; heads operate directly on features [B, feature_dim]
                   no temporal information (ablation)
 
@@ -143,11 +142,48 @@ class ConceptActorCritic(nn.Module):
     signal, distinguishing them from FlexibleMultiTaskNetwork regardless of
     temporal encoding.
 
-    forward(features, h_prev) → (c_t, h_t, concept_dists, V_c)
-      c_t:           [B, n_concepts]
+    Action-conditional concept value estimation:
+      The concept critic is Q_c(h_t, a_t) rather than V_c(h_t).
+      critic_head takes concat(head_input, a_t_one_hot) so it can answer
+      "given state history h_t and the action I'm about to take, what is the
+      expected discounted concept accuracy?"
+
+      Scope limitation: this makes the VALUE FUNCTION action-conditional, not the
+      concept PREDICTIONS themselves.  The concept actor c_t = f(h_t) is still a
+      function of observation history only and does not predict what would happen
+      under a candidate action.  Making the concept actor truly action-conditional
+      (e.g. "if I go right, will I collide?") would require conditioning actor
+      heads on the current action, which creates a circular dependency with the
+      task policy π(a|c_t).  That is a deeper architectural change outside this
+      fix's scope.
+
+      Consequence: V_c cannot be computed until after action sampling (in
+      collect_rollouts). forward() returns V_c=None; callers obtain Q_c via
+      compute_concept_value_from_head(head_input, action_one_hot) after sampling.
+      train_concept_actor_critic and evaluate_actions pass stored actions directly
+      to forward(actions=...) so Q_c is computed in one shot there.
+
+    Fix #2 — One-hot policy representation (no false ordinality):
+      Previously, classification concepts were squashed to a float class-index
+      scalar via the STE (0, 1, 2, ..., K-1).  This imposes a false ordinal
+      structure: the policy MLP sees "left"(3) as numerically closer to "down"(2)
+      than to "right"(1) for obstacle_move_direction, which has no ordinal
+      meaning.  The fix keeps the full K-dimensional one-hot STE vector for each
+      classification concept and concatenates them.  The policy MLP input grows
+      from n_concepts scalars to policy_dim = sum(K_i) floats.  Regression
+      concepts remain as scalars.
+
+      concept_slices tracks (start, end) offsets in the policy_dim vector per
+      concept, used by decode_concept_vector and compute_all_metrics to decode
+      back to integer class predictions without rerunning the network.
+      concept_log_probs does NOT use concept_slices — it iterates by concept
+      index over the stored [B, n_concepts] concept_actions directly.
+
+    forward(features, h_prev, actions=None) → (c_t, h_t, concept_dists, V_c)
+      c_t:           [B, policy_dim]  — one-hot cat for classification, scalar for regression
       h_t:           [B, hidden_dim] for 'gru', else None
       concept_dists: list[Distribution]
-      V_c:           [B, 1]
+      V_c:           [B, 1] if actions provided, else None
     """
 
     HIDDEN_DIM = 256
@@ -157,6 +193,7 @@ class ConceptActorCritic(nn.Module):
         feature_dim: int,
         task_types: List[str],
         num_classes: List[int],
+        n_actions: int = 7,
         temporal_encoding: str = "gru",
     ):
         super().__init__()
@@ -166,6 +203,7 @@ class ConceptActorCritic(nn.Module):
         self.task_types = task_types
         self.num_classes = num_classes
         self.n_concepts = len(task_types)
+        self.n_actions = n_actions
         self.temporal_encoding = temporal_encoding
 
         if temporal_encoding == "gru":
@@ -178,7 +216,29 @@ class ConceptActorCritic(nn.Module):
             self.gru = None
             head_input_dim = feature_dim
 
-        # Actor heads — one per concept
+        # Fix #2: compute per-concept slice offsets in the policy vector.
+        # Each classification concept occupies K_i dimensions (one-hot),
+        # each regression concept occupies 1 dimension (scalar).
+        # policy_dim replaces the old concept_dim as the MLP input width.
+        concept_slices: List[Tuple[int, int]] = []
+        offset = 0
+        for task_type, n_cls in zip(task_types, num_classes):
+            if task_type == "classification":
+                concept_slices.append((offset, offset + n_cls))
+                offset += n_cls
+            else:
+                concept_slices.append((offset, offset + 1))
+                offset += 1
+        # Register as buffer so it moves with the module (e.g. .to(device)) but
+        # is not a learnable parameter.
+        self.register_buffer(
+            "_concept_slices",
+            torch.tensor(concept_slices, dtype=torch.long),
+        )
+        self.concept_slices: List[Tuple[int, int]] = concept_slices
+        self.policy_dim: int = offset  # total policy MLP input width
+
+        # Actor heads — one per concept (unchanged from before)
         self.actor_heads = nn.ModuleList()
         for task_type, n_cls in zip(task_types, num_classes):
             if task_type == "classification":
@@ -190,8 +250,13 @@ class ConceptActorCritic(nn.Module):
                 })
                 self.actor_heads.append(head)
 
-        # Concept critic head
-        self.critic_head = nn.Linear(head_input_dim, 1)
+        # Fix #1: action-conditional concept critic Q_c(h_t, a_t).
+        # Input is concat(head_input, a_t_one_hot), so width = head_input_dim + n_actions.
+        # The old passive V_c(h_t) = Linear(head_input_dim, 1) ignored the action,
+        # preventing the critic from expressing "given I take action a, what is the
+        # expected concept accuracy?"  Increasing the input by n_actions fixes this
+        # without changing the number of layers or other hyperparameters.
+        self.critic_head = nn.Linear(head_input_dim + n_actions, 1)
 
     # ------------------------------------------------------------------
 
@@ -216,49 +281,124 @@ class ConceptActorCritic(nn.Module):
 
     # ------------------------------------------------------------------
 
+    def compute_concept_value_from_head(
+        self,
+        head_input: torch.Tensor,
+        action_one_hot: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Q_c(head_input, a_t) — action-conditional concept value.
+
+        Called separately from forward() during rollout, after the action has been
+        sampled, so that V_c is not computed before we know what action was taken.
+        head_input is h_t (GRU output) for temporal_encoding='gru', or CNN features
+        for 'stacked'/'none'.  action_one_hot is [B, n_actions] float.
+
+        Relationship to GAE: concept_values stored in the buffer are Q_c values,
+        and compute_concept_returns_and_advantage in buffer.py treats them as
+        standard V values in the Bellman backup.  This is valid because for each
+        stored (s_t, a_t) pair, Q_c(s_t, a_t) is the correct bootstrap target
+        under the current policy.
+        """
+        return self.critic_head(torch.cat([head_input, action_one_hot], dim=-1))
+
     def forward(
         self,
         features: torch.Tensor,
         h_prev: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], list, torch.Tensor]:
+        actions: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], list, Optional[torch.Tensor]]:
         """
         features: [B, feature_dim]
         h_prev:   [B, hidden_dim] or None  (only used for 'gru')
+        actions:  [B] long tensor of action indices, or None.
+                  When provided, computes Q_c(h_t, a_t) and returns it as V_c.
+                  When None (rollout, before action sampling), V_c = None and the
+                  caller must invoke compute_concept_value_from_head after sampling.
+
         returns:
-          c_t:           [B, n_concepts]
+          c_t:           [B, policy_dim]  — Fix #2: one-hot STE per classification concept
+                                            (not scalar class indices).  No false ordinality.
           h_t:           [B, hidden_dim] for 'gru', else None
           concept_dists: list[Distribution]
-          V_c:           [B, 1]
+          V_c:           [B, 1] if actions provided, else None  — Fix #1
         """
         head_input, h_t = self._get_head_input(features, h_prev)
-        V_c = self.critic_head(head_input)  # [B, 1]
+
+        # Fix #1: compute Q_c only when we have the action.
+        # During rollout, actions=None because the policy has not yet sampled.
+        # During training (train_concept_actor_critic, evaluate_actions), the stored
+        # action is passed in so Q_c is computed in one forward pass.
+        if actions is not None:
+            action_one_hot = F.one_hot(
+                actions.long().flatten(), self.n_actions
+            ).float().to(features.device)           # [B, n_actions]
+            V_c = self.critic_head(torch.cat([head_input, action_one_hot], dim=-1))
+        else:
+            V_c = None
 
         c_t_list = []
         concept_dists = []
 
-        for head, task_type in zip(self.actor_heads, self.task_types):
+        for head, task_type, n_cls in zip(self.actor_heads, self.task_types, self.num_classes):
             if task_type == "classification":
-                logits = head(head_input)                      # [B, K]
+                logits = head(head_input)                           # [B, K]
                 dist = Categorical(logits=logits)
-                # Straight-through estimator: argmax forward, softmax backward
-                hard = logits.argmax(dim=1).float()            # [B]
-                soft = F.softmax(logits, dim=1)                # [B, K]
-                k = logits.size(1)
-                one_hot = F.one_hot(hard.long(), k).float()
-                c = (one_hot - soft).detach() + soft
-                c = (c * torch.arange(k, device=features.device).float()).sum(dim=1)
+
+                # Fix #2: Straight-through estimator — one-hot forward, softmax backward.
+                # Previously this collapsed to a scalar class index via dot product with
+                # [0,1,...,K-1], imposing a false ordinal structure on non-ordinal
+                # categories (e.g. obstacle_move_direction: 0=stayed,1=right,...,4=up).
+                # Now we keep the full K-dimensional one-hot vector, which is what the
+                # policy MLP should receive.  The downstream MLP input dimension grows
+                # from n_concepts to policy_dim = sum(K_i), tracked via concept_slices.
+                hard_idx  = logits.argmax(dim=1)                    # [B]
+                soft      = F.softmax(logits, dim=1)                # [B, K]
+                one_hot_h = F.one_hot(hard_idx, n_cls).float()      # [B, K]
+                # STE: hard one-hot in the forward pass, soft gradient in the backward pass.
+                # This preserves the categorical semantics while allowing gradient flow
+                # through the softmax, following Bengio et al. (2013).
+                c = (one_hot_h - soft).detach() + soft              # [B, K]
                 c_t_list.append(c)
                 concept_dists.append(dist)
             else:
-                mu      = head["mu"](head_input).squeeze(-1)       # [B]
-                log_std = head["log_std"](head_input).squeeze(-1)  # [B]
+                mu      = head["mu"](head_input).squeeze(-1)        # [B]
+                log_std = head["log_std"](head_input).squeeze(-1)   # [B]
                 log_std = torch.clamp(log_std, -4.0, 2.0)
                 dist = Normal(mu, log_std.exp())
-                c_t_list.append(mu)
+                # Regression concepts remain scalars — ordinal structure is valid here.
+                c_t_list.append(mu.unsqueeze(-1))                   # [B, 1]
                 concept_dists.append(dist)
 
-        c_t = torch.stack(c_t_list, dim=1)  # [B, n_concepts]
+        # Concatenate all concept representations into the policy vector.
+        # Shape: [B, policy_dim].  policy_dim = sum(K_i for cls) + count(reg).
+        # concept_slices[i] = (start, end) gives the slice for concept i.
+        c_t = torch.cat(c_t_list, dim=1)
         return c_t, h_t, concept_dists, V_c
+
+    # ------------------------------------------------------------------
+
+    def decode_concept_vector(self, c_t: torch.Tensor) -> torch.Tensor:
+        """
+        Project the policy-format concept vector [B, policy_dim] back into
+        ground-truth-comparable concept space [B, n_concepts].
+
+        For classification: argmax of the one-hot slice → integer class (float).
+        For regression: scalar at the slice start (unchanged).
+
+        This is used ONLY for logging and evaluation callers
+        (_compute_concept_accuracy_from_buffer, _compute_concept_mse_from_buffer,
+        compare._evaluate_concepts).  It must NOT be used for _compute_concept_reward
+        or PPO training — those use the stored sampled concept_actions instead,
+        for reward/ratio consistency.
+        """
+        decoded = []
+        for (start, end), task_type in zip(self.concept_slices, self.task_types):
+            if task_type == "classification":
+                decoded.append(c_t[:, start:end].argmax(dim=1).float())
+            else:
+                decoded.append(c_t[:, start])
+        return torch.stack(decoded, dim=1)  # [B, n_concepts]
 
     # ------------------------------------------------------------------
 
@@ -302,30 +442,84 @@ class ConceptActorCritic(nn.Module):
     def compute_all_metrics(
         self, preds: torch.Tensor, ground_truth: torch.Tensor
     ) -> List[float]:
+        """
+        preds:        [B, policy_dim] one-hot format (Fix #2 output of forward())
+                      OR [B, n_concepts] legacy scalar format.
+        ground_truth: [B, n_concepts] integer class labels.
+
+        For classification: decodes argmax from the concept's one-hot slice using
+        concept_slices.  For regression: reads the single scalar at the slice start.
+        This makes the metric computation consistent with the new policy representation
+        without changing how ground-truth labels are stored in the buffer.
+        """
+        is_one_hot = (preds.shape[1] == self.policy_dim and self.policy_dim != self.n_concepts)
         metrics = []
-        for idx, task_type in enumerate(self.task_types):
-            pred = preds[:, idx]
+        for idx, (task_type, (start, end)) in enumerate(
+            zip(self.task_types, self.concept_slices)
+        ):
             truth = ground_truth[:, idx]
             if task_type == "classification":
-                metric = (pred.round().long() == truth.long()).float().mean().item()
+                if is_one_hot:
+                    # Decode integer class from the one-hot slice for this concept.
+                    pred = preds[:, start:end].argmax(dim=1).long()
+                else:
+                    # Legacy path: scalar float predictions (e.g. from FlexibleMultiTaskNetwork
+                    # or older checkpoints).  Round to nearest integer class.
+                    pred = preds[:, idx].round().long()
+                metric = (pred == truth.long()).float().mean().item()
             else:
+                pred = preds[:, start] if is_one_hot else preds[:, idx]
                 metric = F.mse_loss(pred.float(), truth.float()).item()
             metrics.append(metric)
         return metrics
 
+    def sample_concept_actions(
+        self,
+        concept_dists: list,
+    ) -> torch.Tensor:
+        """
+        Sample one action per concept from the current concept distributions.
+
+        Returns [B, n_concepts] float — one sampled value per concept.
+        Classification entries are integer class indices (stored as float for
+        buffer uniformity); regression entries are float samples from Normal.
+
+        These samples are what the PPO importance ratio is computed over: both
+        old_log_prob (at collection time) and new_log_prob (at training time) are
+        evaluated at the SAME stored sample, ensuring the ratio measures policy
+        change on a fixed action.
+        """
+        samples = []
+        for dist, task_type in zip(concept_dists, self.task_types):
+            if task_type == "classification":
+                # Sample integer class index from Categorical distribution.
+                samples.append(dist.sample().float())   # [B]
+            else:
+                # Sample from Normal(mu, sigma).
+                samples.append(dist.sample())            # [B]
+        return torch.stack(samples, dim=1)  # [B, n_concepts]
+
     def concept_log_probs(
         self,
         concept_dists: list,
-        c_t: torch.Tensor,
+        concept_actions: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Sum of log-probs across concepts.
-        c_t: [B, n_concepts]
-        returns: [B]
+        Sum of log-probs evaluated at stored concept_actions.
+
+        concept_actions: [B, n_concepts] — the sampled concept actions from the
+        rollout, stored in the buffer.  Each column is one concept's action:
+        integer class for classification, float value for regression.
+
+        This method iterates by concept index (not concept_slices) because
+        concept_actions is already in per-concept [B, n_concepts] layout.
+        Classification entries must be cast to long for Categorical.log_prob().
+
+        returns: [B] — summed log prob across all concepts.
         """
         log_p = []
-        for idx, (dist, task_type) in enumerate(zip(concept_dists, self.task_types)):
-            c = c_t[:, idx]
+        for i, (dist, task_type) in enumerate(zip(concept_dists, self.task_types)):
+            c = concept_actions[:, i]
             if task_type == "classification":
                 lp = dist.log_prob(c.long())
             else:

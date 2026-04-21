@@ -1,0 +1,90 @@
+{
+  "benchmarks": [
+    {
+      "benchmark_id": "phase_crossing_state",
+      "env_name": "phase_crossing_state",
+      "family": "phase_crossing",
+      "variant": "state",
+      "role": "state",
+      "capability_tags": [
+        "phase_inference",
+        "diagnostic"
+      ],
+      "difficulty_level": "easy",
+      "canonical_total_timesteps": 250000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.5239,
+      "oracle_reference": 0.92728
+    },
+    {
+      "benchmark_id": "phase_crossing_visible",
+      "env_name": "phase_crossing_visible",
+      "family": "phase_crossing",
+      "variant": "visible",
+      "role": "visible",
+      "capability_tags": [
+        "phase_inference",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 600000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "phase_crossing",
+      "reactive_reference": 0.5239,
+      "oracle_reference": 0.92728
+    },
+    {
+      "benchmark_id": "phase_crossing",
+      "env_name": "phase_crossing",
+      "family": "phase_crossing",
+      "variant": "hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "phase_inference",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 800000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "phase_crossing_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.5239,
+      "oracle_reference": 0.92728
+    }
+  ]
+}
