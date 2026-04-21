@@ -6,24 +6,22 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from envs.phase_crossing import (
-    make_single_phase_crossing_env,
-    make_single_phase_crossing_state_env,
-    make_single_phase_crossing_visible_env,
+from envs.momentum_corridor import (
+    make_single_momentum_corridor_env,
+    make_single_momentum_corridor_state_env,
+    make_single_momentum_corridor_visible_env,
 )
-from envs.phase_crossing_core import (
+from envs.momentum_corridor_core import (
     Actions,
     GOAL,
     MAX_STEPS,
-    PhaseCrossingSimulator,
+    MomentumCorridorSimulator,
     START,
     STEP_REWARD,
-    SWEEPER_LEFT,
-    SWEEPER_RIGHT,
 )
 
 
-def run_actions(sim: PhaseCrossingSimulator, actions):
+def run_actions(sim: MomentumCorridorSimulator, actions):
     history = []
     for action in actions:
         state, reward, terminated, truncated, info = sim.step(action)
@@ -37,7 +35,7 @@ def run_policy(policy_fn, n_episodes: int = 100):
     returns = []
     successes = 0
     for seed in range(n_episodes):
-        sim = PhaseCrossingSimulator(seed=seed)
+        sim = MomentumCorridorSimulator(seed=seed)
         state = sim.reset()
         total_reward = 0.0
         memory = {}
@@ -52,15 +50,15 @@ def run_policy(policy_fn, n_episodes: int = 100):
     return float(np.mean(returns)), successes / n_episodes
 
 
-def reactive_failure_policy(sim: PhaseCrossingSimulator, state, memory):
+def reactive_failure_policy(sim: MomentumCorridorSimulator, state, memory):
     if state.agent_pos == START:
-        return Actions.UP if state.sweeper_x in {1, 3, 5} else Actions.STAY
+        return Actions.UP if state.mover_x in {1, 2, 6, 7} else Actions.STAY
     if state.agent_pos[1] > GOAL[1]:
         return Actions.UP
     return Actions.STAY
 
 
-def oracle_policy(sim: PhaseCrossingSimulator, state, memory):
+def oracle_policy(sim: MomentumCorridorSimulator, state, memory):
     if state.agent_pos == START:
         return Actions.UP if sim.safe_to_start_crossing(state) else Actions.STAY
     if state.agent_pos[1] > GOAL[1]:
@@ -68,53 +66,54 @@ def oracle_policy(sim: PhaseCrossingSimulator, state, memory):
     return Actions.STAY
 
 
-def always_forward_policy(sim: PhaseCrossingSimulator, state, memory):
+def always_forward_policy(sim: MomentumCorridorSimulator, state, memory):
     return Actions.UP if state.agent_pos[1] > GOAL[1] else Actions.STAY
 
 
-def visible_control_policy(sim: PhaseCrossingSimulator, state, memory):
+def visible_control_policy(sim: MomentumCorridorSimulator, state, memory):
     return oracle_policy(sim, state, memory)
 
 
-def direction_hud_signature(obs_chw):
+def hud_signature(obs_chw):
     arr = np.asarray(obs_chw).transpose(1, 2, 0)
     return (
         int(arr[76, 6, 0]),
-        int(arr[76, 6, 1]),
+        int(arr[76, 38, 0]),
+        int(arr[76, 48, 0]),
         int(arr[76, 78, 0]),
-        int(arr[76, 78, 1]),
     )
 
 
 def test_reset_controls_work():
-    sim = PhaseCrossingSimulator(seed=0)
-    state = sim.reset(forced_sweeper_x=1, forced_sweeper_direction=SWEEPER_LEFT)
-    assert state.sweeper_x == 1
-    assert state.sweeper_direction == SWEEPER_LEFT
+    sim = MomentumCorridorSimulator(seed=0)
+    state = sim.reset(forced_mover_x=2, forced_mover_velocity=-2)
+    assert state.mover_x == 2
+    assert state.mover_velocity == -2
 
 
 def test_invalid_reset_controls_raise():
-    sim = PhaseCrossingSimulator(seed=0)
+    sim = MomentumCorridorSimulator(seed=0)
     with pytest.raises(ValueError):
-        sim.reset(forced_sweeper_x=0)
+        sim.reset(forced_mover_x=0)
     with pytest.raises(ValueError):
-        sim.reset(forced_sweeper_direction="up")
+        sim.reset(forced_mover_velocity=0)
 
 
-def test_sweeper_wraps_around_track():
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=1, forced_sweeper_direction=SWEEPER_LEFT)
+def test_mover_reflects_at_rail_boundary():
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=1, forced_mover_velocity=-2)
     state, *_ = sim.step(Actions.STAY)
-    assert state.sweeper_x == 5
+    assert state.mover_x == 3
+    assert state.mover_velocity == 2
 
 
-def test_unsafe_start_collides_on_second_crossing_step():
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=1, forced_sweeper_direction=SWEEPER_RIGHT)
-    history = run_actions(sim, [Actions.UP, Actions.UP])
+def test_unsafe_start_collides_on_first_crossing_step():
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=2, forced_mover_velocity=2)
+    history = run_actions(sim, [Actions.UP])
     state, reward, terminated, truncated, info = history[-1]
-    assert state.agent_pos == (3, 3)
-    assert state.sweeper_x == 3
+    assert state.agent_pos == (4, 4)
+    assert state.mover_x == 4
     assert terminated is True
     assert truncated is False
     assert reward == pytest.approx(-1.0)
@@ -122,8 +121,8 @@ def test_unsafe_start_collides_on_second_crossing_step():
 
 
 def test_safe_start_succeeds():
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=1, forced_sweeper_direction=SWEEPER_LEFT)
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=1, forced_mover_velocity=-1)
     history = run_actions(sim, [Actions.UP, Actions.UP, Actions.UP, Actions.UP])
     state, reward, terminated, truncated, info = history[-1]
     assert state.agent_pos == GOAL
@@ -134,8 +133,8 @@ def test_safe_start_succeeds():
 
 
 def test_timeout_occurs_after_max_steps():
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=2, forced_sweeper_direction=SWEEPER_LEFT)
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=3, forced_mover_velocity=-1)
     history = run_actions(sim, [Actions.STAY] * MAX_STEPS)
     _, _, terminated, truncated, info = history[-1]
     assert terminated is False
@@ -144,14 +143,14 @@ def test_timeout_occurs_after_max_steps():
 
 
 def test_rewards_match_step_and_goal():
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=2, forced_sweeper_direction=SWEEPER_LEFT)
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=3, forced_mover_velocity=-1)
     _, reward, terminated, truncated, _ = sim.step(Actions.STAY)
     assert reward == pytest.approx(STEP_REWARD)
     assert not terminated and not truncated
 
-    sim = PhaseCrossingSimulator(seed=0)
-    sim.reset(forced_sweeper_x=1, forced_sweeper_direction=SWEEPER_LEFT)
+    sim = MomentumCorridorSimulator(seed=0)
+    sim.reset(forced_mover_x=1, forced_mover_velocity=-1)
     history = run_actions(sim, [Actions.UP, Actions.UP, Actions.UP, Actions.UP])
     _, reward, terminated, truncated, _ = history[-1]
     assert reward == pytest.approx(1.0)
@@ -160,26 +159,26 @@ def test_rewards_match_step_and_goal():
 
 
 def test_state_wrapper_observation_shape():
-    env = make_single_phase_crossing_state_env(seed=0)
+    env = make_single_momentum_corridor_state_env(seed=0)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (3,)
 
 
 def test_pixel_wrapper_stack_shapes():
-    env = make_single_phase_crossing_env(seed=0, n_stack=1)
+    env = make_single_momentum_corridor_env(seed=0, n_stack=1)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (3, 84, 84)
 
-    env = make_single_phase_crossing_env(seed=0, n_stack=4)
+    env = make_single_momentum_corridor_env(seed=0, n_stack=4)
     obs, _ = env.reset(seed=0)
     assert obs.shape == (12, 84, 84)
 
 
-def test_visible_wrapper_exposes_direction_in_hud():
-    env = make_single_phase_crossing_visible_env(seed=0, n_stack=1)
-    obs_left, _ = env.reset(seed=0, options={"forced_sweeper_x": 1, "forced_sweeper_direction": SWEEPER_LEFT})
-    obs_right, _ = env.reset(seed=0, options={"forced_sweeper_x": 1, "forced_sweeper_direction": SWEEPER_RIGHT})
-    assert direction_hud_signature(obs_left) != direction_hud_signature(obs_right)
+def test_visible_wrapper_exposes_velocity_in_hud():
+    env = make_single_momentum_corridor_visible_env(seed=0, n_stack=1)
+    obs_left_fast, _ = env.reset(seed=0, options={"forced_mover_x": 2, "forced_mover_velocity": -2})
+    obs_right_slow, _ = env.reset(seed=0, options={"forced_mover_x": 2, "forced_mover_velocity": 1})
+    assert hud_signature(obs_left_fast) != hud_signature(obs_right_slow)
 
 
 def test_oracle_beats_reactive_policy():

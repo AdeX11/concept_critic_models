@@ -11,9 +11,28 @@ from .armed_corridor import (
 )
 from .phase_crossing import (
     make_phase_crossing_env,
+    make_phase_crossing_hard_env,
+    make_phase_crossing_hard_state_env,
+    make_phase_crossing_hard_visible_env,
     make_phase_crossing_state_env,
     make_phase_crossing_visible_env,
     PhaseCrossingPixelEnv,
     PhaseCrossingStateEnv,
     PhaseCrossingVisibleEnv,
+)
+from .momentum_corridor import (
+    make_momentum_corridor_env,
+    make_momentum_corridor_state_env,
+    make_momentum_corridor_visible_env,
+    MomentumCorridorPixelEnv,
+    MomentumCorridorStateEnv,
+    MomentumCorridorVisibleEnv,
+)
+from .synchrony_window import (
+    make_synchrony_window_env,
+    make_synchrony_window_state_env,
+    make_synchrony_window_visible_env,
+    SynchronyWindowPixelEnv,
+    SynchronyWindowStateEnv,
+    SynchronyWindowVisibleEnv,
 )

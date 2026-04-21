@@ -20,7 +20,8 @@ START = (3, 5)
 GOAL = (3, 1)
 CORRIDOR_X = 3
 CORRIDOR_CELLS = {(CORRIDOR_X, y) for y in range(1, 6)}
-HAZARD_AGENT_Y = {3, 4}
+DEFAULT_HAZARD_ROWS = (3, 4)
+HARD_HAZARD_ROWS = (2, 3, 4)
 SWEEPER_X_VALUES = (1, 2, 3, 4, 5)
 SWEEPER_LEFT = "left"
 SWEEPER_RIGHT = "right"
@@ -87,8 +88,14 @@ class PhaseCrossingSimulator:
 
     actions = Actions
 
-    def __init__(self, seed: int = 0):
+    def __init__(
+        self,
+        seed: int = 0,
+        hazard_rows: Tuple[int, ...] = DEFAULT_HAZARD_ROWS,
+    ):
         self.rng = np.random.default_rng(seed)
+        self.hazard_rows = tuple(sorted(hazard_rows))
+        self._validate_hazard_rows(self.hazard_rows)
         self.state = PhaseCrossingState()
 
     def reset(
@@ -166,7 +173,7 @@ class PhaseCrossingSimulator:
             [
                 state.agent_pos[1],
                 int(state.agent_pos == START),
-                int(state.agent_pos[1] in HAZARD_AGENT_Y),
+                int(state.agent_pos[1] in self.hazard_rows),
                 state.sweeper_x - SWEEPER_X_VALUES[0],
                 0 if state.sweeper_direction == SWEEPER_LEFT else 1,
             ],
@@ -202,7 +209,7 @@ class PhaseCrossingSimulator:
                 x1 = x0 + cell_w
 
                 color = COLOR_WALL
-                if x in SWEEPER_X_VALUES and y in HAZARD_AGENT_Y:
+                if x in SWEEPER_X_VALUES and y in self.hazard_rows:
                     color = COLOR_LANE
                 if (x, y) in CORRIDOR_CELLS:
                     color = COLOR_CORRIDOR
@@ -215,7 +222,7 @@ class PhaseCrossingSimulator:
                 canvas[y1 - 1, x0:x1] = COLOR_BG
 
         sweeper_x = state.sweeper_x
-        for sweeper_y in HAZARD_AGENT_Y:
+        for sweeper_y in self.hazard_rows:
             y0 = y_offset + sweeper_y * cell_h
             x0 = x_offset + sweeper_x * cell_w
             canvas[y0 + 2:y0 + cell_h - 2, x0 + 2:x0 + cell_w - 2] = COLOR_SWEEPER
@@ -228,9 +235,22 @@ class PhaseCrossingSimulator:
 
     def safe_to_start_crossing(self, state: Optional[PhaseCrossingState] = None) -> bool:
         state = self.state if state is None else state
-        x1 = self._advance_sweeper(state.sweeper_x, state.sweeper_direction)
-        x2 = self._advance_sweeper(x1, state.sweeper_direction)
-        return x1 != CORRIDOR_X and x2 != CORRIDOR_X
+        sweeper_x = state.sweeper_x
+        for _ in self.hazard_rows:
+            sweeper_x = self._advance_sweeper(sweeper_x, state.sweeper_direction)
+            if sweeper_x == CORRIDOR_X:
+                return False
+        return True
+
+    @staticmethod
+    def _validate_hazard_rows(hazard_rows: Tuple[int, ...]) -> None:
+        if not hazard_rows:
+            raise ValueError("hazard_rows must be non-empty")
+        if tuple(sorted(hazard_rows)) != hazard_rows:
+            raise ValueError("hazard_rows must be sorted ascending")
+        for y in hazard_rows:
+            if y not in range(1, 6):
+                raise ValueError("hazard_rows must lie inside corridor rows 1..5")
 
     @staticmethod
     def _validate_reset_controls(
@@ -251,5 +271,8 @@ class PhaseCrossingSimulator:
         return SWEEPER_X_VALUES[(idx + delta) % len(SWEEPER_X_VALUES)]
 
     @staticmethod
-    def _is_collision(state: PhaseCrossingState) -> bool:
-        return state.agent_pos[1] in HAZARD_AGENT_Y and state.sweeper_x == CORRIDOR_X
+    def _is_collision_with_rows(state: PhaseCrossingState, hazard_rows: Tuple[int, ...]) -> bool:
+        return state.agent_pos[1] in hazard_rows and state.sweeper_x == CORRIDOR_X
+
+    def _is_collision(self, state: PhaseCrossingState) -> bool:
+        return self._is_collision_with_rows(state, self.hazard_rows)

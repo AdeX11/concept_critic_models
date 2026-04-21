@@ -28,13 +28,35 @@ from .lunar_lander import (
     make_single_lunar_lander_state_env,
 )
 from .mountain_car import make_mountain_car_env, make_single_mountain_car_env
+from .momentum_corridor import (
+    make_momentum_corridor_env,
+    make_momentum_corridor_state_env,
+    make_momentum_corridor_visible_env,
+    make_single_momentum_corridor_env,
+    make_single_momentum_corridor_state_env,
+    make_single_momentum_corridor_visible_env,
+)
 from .phase_crossing import (
     make_phase_crossing_env,
+    make_phase_crossing_hard_env,
+    make_phase_crossing_hard_state_env,
+    make_phase_crossing_hard_visible_env,
     make_phase_crossing_state_env,
     make_phase_crossing_visible_env,
     make_single_phase_crossing_env,
+    make_single_phase_crossing_hard_env,
+    make_single_phase_crossing_hard_state_env,
+    make_single_phase_crossing_hard_visible_env,
     make_single_phase_crossing_state_env,
     make_single_phase_crossing_visible_env,
+)
+from .synchrony_window import (
+    make_single_synchrony_window_env,
+    make_single_synchrony_window_state_env,
+    make_single_synchrony_window_visible_env,
+    make_synchrony_window_env,
+    make_synchrony_window_state_env,
+    make_synchrony_window_visible_env,
 )
 
 
@@ -125,6 +147,63 @@ ENV_REGISTRY: Dict[str, EnvFactorySpec] = {
         env_name="phase_crossing_state",
         make_vec=make_phase_crossing_state_env,
         make_single=make_single_phase_crossing_state_env,
+        pass_n_stack=False,
+        state_like=True,
+    ),
+    "phase_crossing_hard": EnvFactorySpec(
+        env_name="phase_crossing_hard",
+        make_vec=make_phase_crossing_hard_env,
+        make_single=make_single_phase_crossing_hard_env,
+        pass_n_stack=True,
+    ),
+    "phase_crossing_hard_visible": EnvFactorySpec(
+        env_name="phase_crossing_hard_visible",
+        make_vec=make_phase_crossing_hard_visible_env,
+        make_single=make_single_phase_crossing_hard_visible_env,
+        pass_n_stack=True,
+    ),
+    "phase_crossing_hard_state": EnvFactorySpec(
+        env_name="phase_crossing_hard_state",
+        make_vec=make_phase_crossing_hard_state_env,
+        make_single=make_single_phase_crossing_hard_state_env,
+        pass_n_stack=False,
+        state_like=True,
+    ),
+    "momentum_corridor": EnvFactorySpec(
+        env_name="momentum_corridor",
+        make_vec=make_momentum_corridor_env,
+        make_single=make_single_momentum_corridor_env,
+        pass_n_stack=True,
+    ),
+    "momentum_corridor_visible": EnvFactorySpec(
+        env_name="momentum_corridor_visible",
+        make_vec=make_momentum_corridor_visible_env,
+        make_single=make_single_momentum_corridor_visible_env,
+        pass_n_stack=True,
+    ),
+    "momentum_corridor_state": EnvFactorySpec(
+        env_name="momentum_corridor_state",
+        make_vec=make_momentum_corridor_state_env,
+        make_single=make_single_momentum_corridor_state_env,
+        pass_n_stack=False,
+        state_like=True,
+    ),
+    "synchrony_window": EnvFactorySpec(
+        env_name="synchrony_window",
+        make_vec=make_synchrony_window_env,
+        make_single=make_single_synchrony_window_env,
+        pass_n_stack=True,
+    ),
+    "synchrony_window_visible": EnvFactorySpec(
+        env_name="synchrony_window_visible",
+        make_vec=make_synchrony_window_visible_env,
+        make_single=make_single_synchrony_window_visible_env,
+        pass_n_stack=True,
+    ),
+    "synchrony_window_state": EnvFactorySpec(
+        env_name="synchrony_window_state",
+        make_vec=make_synchrony_window_state_env,
+        make_single=make_single_synchrony_window_state_env,
         pass_n_stack=False,
         state_like=True,
     ),

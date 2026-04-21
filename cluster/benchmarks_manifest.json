@@ -1,6 +1,473 @@
 {
   "benchmarks": [
     {
+      "benchmark_id": "armed_corridor",
+      "env_name": "armed_corridor",
+      "family": "armed_corridor",
+      "variant": "hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "event_memory",
+        "countdown",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 1000000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "route_taken",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "armed_corridor_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.66,
+      "oracle_reference": 0.795
+    },
+    {
+      "benchmark_id": "armed_corridor_state",
+      "env_name": "armed_corridor_state",
+      "family": "armed_corridor",
+      "variant": "state",
+      "role": "state",
+      "capability_tags": [
+        "event_memory",
+        "countdown",
+        "diagnostic"
+      ],
+      "difficulty_level": "easy",
+      "canonical_total_timesteps": 200000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate",
+        "min_mean_return": 0.6,
+        "min_success_rate": 0.95
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.66,
+      "oracle_reference": 0.795
+    },
+    {
+      "benchmark_id": "armed_corridor_visible",
+      "env_name": "armed_corridor_visible",
+      "family": "armed_corridor",
+      "variant": "visible",
+      "role": "visible",
+      "capability_tags": [
+        "event_memory",
+        "countdown",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 500000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "route_taken"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "armed_corridor",
+      "reactive_reference": 0.66,
+      "oracle_reference": 0.795
+    },
+    {
+      "benchmark_id": "cartpole",
+      "env_name": "cartpole",
+      "family": "cartpole",
+      "variant": "default",
+      "role": "calibration",
+      "capability_tags": [
+        "calibration",
+        "static_visible"
+      ],
+      "difficulty_level": "calibration",
+      "canonical_total_timesteps": 300000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "solvable",
+        "min_mean_return": 450.0
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "dynamic_obstacles",
+      "env_name": "dynamic_obstacles",
+      "family": "dynamic_obstacles",
+      "variant": "default",
+      "role": "legacy",
+      "capability_tags": [
+        "legacy_temporal",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 750000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "legacy_reference"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "lunar_lander",
+      "env_name": "lunar_lander",
+      "family": "lunar_lander",
+      "variant": "pixel",
+      "role": "calibration",
+      "capability_tags": [
+        "calibration",
+        "static_visible",
+        "pixel"
+      ],
+      "difficulty_level": "calibration",
+      "canonical_total_timesteps": 750000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "solvable"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "lunar_lander_pos_only",
+      "env_name": "lunar_lander_pos_only",
+      "family": "lunar_lander",
+      "variant": "pos_only",
+      "role": "calibration",
+      "capability_tags": [
+        "calibration",
+        "static_visible"
+      ],
+      "difficulty_level": "calibration",
+      "canonical_total_timesteps": 500000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "solvable"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "lunar_lander_state",
+      "env_name": "lunar_lander_state",
+      "family": "lunar_lander",
+      "variant": "state",
+      "role": "calibration",
+      "capability_tags": [
+        "calibration",
+        "static_visible"
+      ],
+      "difficulty_level": "calibration",
+      "canonical_total_timesteps": 500000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "solvable"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "momentum_corridor",
+      "env_name": "momentum_corridor",
+      "family": "momentum_corridor",
+      "variant": "hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "latent_dynamics",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 800000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "momentum_corridor_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.36484,
+      "oracle_reference": 0.93082
+    },
+    {
+      "benchmark_id": "momentum_corridor_state",
+      "env_name": "momentum_corridor_state",
+      "family": "momentum_corridor",
+      "variant": "state",
+      "role": "state",
+      "capability_tags": [
+        "latent_dynamics",
+        "diagnostic"
+      ],
+      "difficulty_level": "easy",
+      "canonical_total_timesteps": 250000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.36484,
+      "oracle_reference": 0.93082
+    },
+    {
+      "benchmark_id": "momentum_corridor_visible",
+      "env_name": "momentum_corridor_visible",
+      "family": "momentum_corridor",
+      "variant": "visible",
+      "role": "visible",
+      "capability_tags": [
+        "latent_dynamics",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 600000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "momentum_corridor",
+      "reactive_reference": 0.36484,
+      "oracle_reference": 0.93082
+    },
+    {
+      "benchmark_id": "mountain_car",
+      "env_name": "mountain_car",
+      "family": "mountain_car",
+      "variant": "default",
+      "role": "calibration",
+      "capability_tags": [
+        "calibration",
+        "latent_dynamics"
+      ],
+      "difficulty_level": "calibration",
+      "canonical_total_timesteps": 500000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "solvable"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
+      "benchmark_id": "phase_crossing",
+      "env_name": "phase_crossing",
+      "family": "phase_crossing",
+      "variant": "hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "phase_inference",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 800000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "phase_crossing_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.5239,
+      "oracle_reference": 0.92728
+    },
+    {
+      "benchmark_id": "phase_crossing_hard",
+      "env_name": "phase_crossing_hard",
+      "family": "phase_crossing",
+      "variant": "hard_hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "phase_inference",
+        "pixel"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 900000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "phase_crossing_hard_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": -0.24632,
+      "oracle_reference": 0.916
+    },
+    {
+      "benchmark_id": "phase_crossing_hard_state",
+      "env_name": "phase_crossing_hard_state",
+      "family": "phase_crossing",
+      "variant": "hard_state",
+      "role": "state",
+      "capability_tags": [
+        "phase_inference",
+        "diagnostic"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 300000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": -0.24632,
+      "oracle_reference": 0.916
+    },
+    {
+      "benchmark_id": "phase_crossing_hard_visible",
+      "env_name": "phase_crossing_hard_visible",
+      "family": "phase_crossing",
+      "variant": "hard_visible",
+      "role": "visible",
+      "capability_tags": [
+        "phase_inference",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 700000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "phase_crossing_hard",
+      "reactive_reference": -0.24632,
+      "oracle_reference": 0.916
+    },
+    {
       "benchmark_id": "phase_crossing_state",
       "env_name": "phase_crossing_state",
       "family": "phase_crossing",
@@ -58,9 +525,9 @@
       "oracle_reference": 0.92728
     },
     {
-      "benchmark_id": "phase_crossing",
-      "env_name": "phase_crossing",
-      "family": "phase_crossing",
+      "benchmark_id": "synchrony_window",
+      "env_name": "synchrony_window",
+      "family": "synchrony_window",
       "variant": "hidden",
       "role": "hidden",
       "capability_tags": [
@@ -81,10 +548,67 @@
       },
       "paper_central": true,
       "requires_control_twin": true,
-      "visible_control_id": "phase_crossing_visible",
+      "visible_control_id": "synchrony_window_visible",
       "hidden_benchmark_id": null,
-      "reactive_reference": 0.5239,
-      "oracle_reference": 0.92728
+      "reactive_reference": 0.3702,
+      "oracle_reference": 0.9334
+    },
+    {
+      "benchmark_id": "synchrony_window_state",
+      "env_name": "synchrony_window_state",
+      "family": "synchrony_window",
+      "variant": "state",
+      "role": "state",
+      "capability_tags": [
+        "phase_inference",
+        "diagnostic"
+      ],
+      "difficulty_level": "easy",
+      "canonical_total_timesteps": 250000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.3702,
+      "oracle_reference": 0.9334
+    },
+    {
+      "benchmark_id": "synchrony_window_visible",
+      "env_name": "synchrony_window_visible",
+      "family": "synchrony_window",
+      "variant": "visible",
+      "role": "visible",
+      "capability_tags": [
+        "phase_inference",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 600000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "synchrony_window",
+      "reactive_reference": 0.3702,
+      "oracle_reference": 0.9334
     }
   ]
 }
