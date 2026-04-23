@@ -31,6 +31,7 @@ from envs.lunar_lander    import (make_lunar_lander_env,           make_single_l
                                    make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
 from envs.mountain_car    import  make_mountain_car_env,             make_single_mountain_car_env
 from envs.hidden_velocity import  make_hidden_velocity_env,          make_single_hidden_velocity_env
+from envs.tmaze          import  make_tmaze_env,                     make_single_tmaze_env
 from ppo.ppo              import PPO
 
 
@@ -80,11 +81,14 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "hidden_velocity":
         vec_env    = make_hidden_velocity_env(n_envs, seed)
         single_env = make_single_hidden_velocity_env(seed)
+    elif env_name == "tmaze":
+        vec_env    = make_tmaze_env(n_envs, seed, n_stack=n_stack)
+        single_env = make_single_tmaze_env(seed, n_stack=n_stack)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
-    # hidden_velocity has a low-dim obs — use a smaller feature extractor
-    features_dim = 128 if env_name == "hidden_velocity" else 512
+    # low-dim obs envs use a smaller feature extractor
+    features_dim = 128 if env_name in ("hidden_velocity", "tmaze") else 512
 
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
@@ -110,7 +114,7 @@ def main() -> None:
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
-                                 "mountain_car", "hidden_velocity"])
+                                 "mountain_car", "hidden_velocity", "tmaze"])
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding for concept_actor_critic: "
