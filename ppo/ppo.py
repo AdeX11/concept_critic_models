@@ -253,8 +253,14 @@ class PPO:
                 self.train_concepts(obs_flat, con_flat, n_epochs=1, batch_size=self.batch_size)
 
             # ---- Train concept actor-critic (every iteration, mirrors train_policy) ----
-            gvf_stats = self.train_gvf()
-            concept_ac_stats = self.train_concept_actor_critic()
+            gvf_stats = {}
+            concept_ac_stats = {}
+
+            if self.method == "gvf":
+                gvf_stats = self.train_gvf()
+            
+            elif self.method == "concept_actor_critic":
+                concept_ac_stats = self.train_concept_actor_critic()
 
             # ---- Concept accuracy tracking (every 10 iters) ----
             concept_loss_log = {}
