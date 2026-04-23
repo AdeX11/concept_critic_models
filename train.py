@@ -103,6 +103,9 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
+    # low-dim obs envs use a smaller feature extractor
+    features_dim = 128 if env_name in ("hidden_velocity", "tmaze") else 512
+
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
         n_actions     = vec_env.single_action_space.n,
@@ -110,7 +113,7 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
         num_classes   = single_env.num_classes,
         concept_dim   = len(single_env.task_types),
         concept_names = single_env.concept_names,
-        features_dim  = 512,
+        features_dim  = features_dim,
         net_arch      = [64, 64],
     )
     return vec_env, single_env, policy_kwargs

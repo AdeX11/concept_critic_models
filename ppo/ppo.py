@@ -68,6 +68,7 @@ class PPO:
         # concept_actor_critic weights
         lambda_v: float = 0.5,        # concept critic loss weight
         lambda_s: float = 0.5,        # supervised anchor weight
+        concept_ac_epochs: Optional[int] = None,  # epochs for concept AC update; defaults to n_epochs
         # training settings
         training_mode: str = "two_phase",   # 'two_phase' | 'end_to_end'
         normalize_advantage: bool = True,
@@ -98,6 +99,7 @@ class PPO:
         self.learning_rate = learning_rate
         self.lambda_v = lambda_v
         self.lambda_s = lambda_s
+        self.concept_ac_epochs = concept_ac_epochs if concept_ac_epochs is not None else n_epochs
         self.normalize_advantage = normalize_advantage
         self.seed = seed
         self.verbose = verbose
@@ -243,14 +245,19 @@ class PPO:
 
             # ---- Joint concept supervision from rollout buffer (every iteration) ----
             if self.method != "no_concept" and self.training_mode == "joint":
-                buf = self.rollout_buffer
-                T, N = buf.buffer_size, buf.n_envs
-                if buf.obs_is_dict:
-                    obs_flat = {k: v.reshape(-1, *v.shape[2:]) for k, v in buf.observations.items()}
+                if self.temporal_encoding == "gru":
+                    # BPTT: process buffer as a sequence so gradients flow
+                    # through the GRU across time steps
+                    self._train_concepts_bptt(n_epochs=self.n_epochs)
                 else:
-                    obs_flat = buf.observations.reshape(T * N, *buf.obs_shape)
-                con_flat = buf.concepts.reshape(T * N, buf.concept_dim)
-                self.train_concepts(obs_flat, con_flat, n_epochs=1, batch_size=self.batch_size)
+                    buf = self.rollout_buffer
+                    T, N = buf.buffer_size, buf.n_envs
+                    if buf.obs_is_dict:
+                        obs_flat = {k: v.reshape(-1, *v.shape[2:]) for k, v in buf.observations.items()}
+                    else:
+                        obs_flat = buf.observations.reshape(T * N, *buf.obs_shape)
+                    con_flat = buf.concepts.reshape(T * N, buf.concept_dim)
+                    self.train_concepts(obs_flat, con_flat, n_epochs=self.n_epochs, batch_size=self.batch_size)
 
             # ---- Train concept actor-critic (every iteration, mirrors train_policy) ----
             gvf_stats = self.train_gvf()
@@ -319,17 +326,17 @@ class PPO:
 
             with torch.no_grad():
                 # Reset hidden state at episode boundaries
-                c_t = None
-                h_prev_for_buffer = h_t.clone() if self.temporal_encoding == "gru" else None
+                # c_t = None
+                # h_prev_for_buffer = h_t.clone() if self.temporal_encoding == "gru" else None
                 if self.method == "concept_actor_critic":
+                    # Reset hidden state at episode boundaries
                     if self.temporal_encoding == "gru":
                         reset_mask = torch.as_tensor(
                             episode_starts, dtype=torch.float32, device=self.device
                         ).unsqueeze(1)
                         h_t = h_t * (1.0 - reset_mask)
-                        # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
-                        h_prev_for_buffer = h_t.clone()
-                    # Full forward pass
+                    # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
+                    h_prev_for_buffer = h_t.clone()
                     features = self.policy.extract_features(obs_tensor)
                     c_t, h_new, concept_dists, V_c = self.policy.concept_net(
                         features, h_t
@@ -340,7 +347,6 @@ class PPO:
                     actions   = dist.sample()
                     log_probs = dist.log_prob(actions)
                     values    = self.policy.value_net(latent).flatten()
-
                     concept_log_prob = (
                         self.policy.concept_net.concept_log_probs(concept_dists, c_t)
                         .cpu().numpy()
@@ -348,30 +354,50 @@ class PPO:
                     concept_value = V_c
                     if h_new is not None:
                         h_t = h_new
-                else:
-                    if self.method == "gvf" and self.temporal_encoding == "gru":
-                        reset_mask = torch.as_tensor(
-                            episode_starts, dtype=torch.float32, device=self.device
-                        ).unsqueeze(1)
-                        h_t = h_t * (1.0 - reset_mask)
-                        h_prev_for_buffer = h_t.clone()
-                    actions, values, log_probs, h_new = self.policy.forward(
-                        obs_tensor, h_t if self.method == "gvf" else None
-                    )
-                    if self.method == "gvf" and h_new is not None:
-                        h_t = h_new
+                elif self.method == "vanilla_freeze" and self.temporal_encoding == "gru":
+                    # vanilla_freeze + GRU: track h_t so BPTT training has valid sequences
+                    reset_mask = torch.as_tensor(
+                        episode_starts, dtype=torch.float32, device=self.device
+                    ).unsqueeze(1)
+                    h_t = h_t * (1.0 - reset_mask)
+                    h_prev_for_buffer = h_t.clone()
+                    features = self.policy.extract_features(obs_tensor)
+                    c_t, h_new = self.policy.concept_net(features, h_t)
+                    latent = self.policy.mlp_extractor(c_t)
+                    action_logits = self.policy.action_net(latent)
+                    dist = torch.distributions.Categorical(logits=action_logits)
+                    actions   = dist.sample()
+                    log_probs = dist.log_prob(actions)
+                    values    = self.policy.value_net(latent).flatten()
                     concept_log_prob = None
-                    concept_value = None
+                    concept_value    = None
+                    if h_new is not None:
+                        h_t = h_new
+                else:
+                    h_prev_for_buffer = h_t.clone()
+                    actions, values, log_probs, h_new = self.policy.forward(obs_tensor)
+                    h_new = None
+                    concept_log_prob = None
+                    concept_value    = None
 
             # Collect ground-truth concepts for CURRENT observation (before stepping)
             concepts = self._get_current_concepts()
 
-            # Compute concept accuracy reward
+            # Collect concept_reward_active mask from env (e.g. TMaze fires only
+            # at the junction).  Used both for concept AC reward and for
+            # filtering the concept accuracy evaluation metric.
+            try:
+                eval_mask = np.array(
+                    self.env.get_attr("concept_reward_active"), dtype=np.float32
+                )
+            except Exception:
+                eval_mask = np.ones(self.n_envs, dtype=np.float32)
+
             concept_reward = None
             if self.method == "concept_actor_critic" and c_t is not None:
                 concept_reward = self._compute_concept_reward(
                     c_t.cpu().numpy(), concepts
-                )
+                ) * eval_mask
 
             # Step environment
             np_actions = actions.cpu().numpy()
@@ -400,6 +426,7 @@ class PPO:
                 concept_value=concept_value,
                 concept_log_prob=concept_log_prob,
                 concept_reward=concept_reward,
+                concept_eval_mask=eval_mask,
             )
 
             self.num_timesteps += self.n_envs
@@ -430,12 +457,15 @@ class PPO:
                 latent = self.policy.mlp_extractor(c_t)
                 last_values = self.policy.value_net(latent).flatten()
                 last_concept_values = V_c_last.flatten()
-            elif self.method == "gvf" and self.temporal_encoding == "gru":
+            elif self.method == "vanilla_freeze" and self.temporal_encoding == "gru":
                 reset_mask = torch.as_tensor(
                     episode_starts, dtype=torch.float32, device=self.device
                 ).unsqueeze(1)
                 h_t_final = h_t * (1.0 - reset_mask)
-                _, last_values, _, _ = self.policy.forward(obs_tensor, h_t_final)
+                features = self.policy.extract_features(obs_tensor)
+                c_t, _ = self.policy.concept_net(features, h_t_final)
+                latent = self.policy.mlp_extractor(c_t)
+                last_values = self.policy.value_net(latent).flatten()
                 last_concept_values = torch.zeros(self.n_envs, device=self.device)
             else:
                 _, last_values, _, _ = self.policy.forward(obs_tensor)
@@ -456,7 +486,7 @@ class PPO:
     def train_policy(self) -> dict:
         self.policy.set_training_mode(True)
 
-        if self.method != "no_concept" and self.training_mode == "two_phase":
+        if self.method != "no_concept" and self.training_mode in ("two_phase", "joint"):
             optimizer = self.policy.optimizer_exclude_concept
         else:
             optimizer = self.policy.optimizer
@@ -468,51 +498,10 @@ class PPO:
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs     = batch["observations"]
                 actions = batch["actions"].long().flatten()
+                h_prev  = batch["hidden_states"] if self.temporal_encoding == "gru" else None
 
-                # --- BPTT SEQUENCE UNROLLING ---
-                if self.method == "concept_actor_critic" and self.temporal_encoding == "gru":
-                    B_seq = self.batch_size // seq_len
-                    
-                    # 1. Bulk extract features for the whole batch (fast)
-                    features = self.policy.extract_features(obs)
-                    features_seq = features.view(B_seq, seq_len, -1)
-                    
-                    # 2. Get initial hidden state for each sequence (step 0 only)
-                    h_prev = batch["hidden_states"].view(B_seq, seq_len, -1)[:, 0, :].contiguous()
-                    actions_seq = actions.view(B_seq, seq_len)
-                    
-                    val_list, logp_list, ent_list = [], [], []
-                    
-                    # 3. Step through time, updating hidden state
-                    for t in range(seq_len):
-                        feat_t = features_seq[:, t]
-                        act_t  = actions_seq[:, t]
-                        
-                        # Bypass evaluate_actions to skip duplicate CNN extraction
-                        latent, h_prev, _, _ = self.policy._get_latent(feat_t, h_prev)
-                        
-                        action_logits = self.policy.action_net(latent)
-                        dist = torch.distributions.Categorical(logits=action_logits)
-                        
-                        val_list.append(self.policy.value_net(latent).flatten())
-                        logp_list.append(dist.log_prob(act_t))
-                        ent_list.append(dist.entropy())
-                        
-                    # 4. Restack and flatten back to standard batch format
-                    values = torch.stack(val_list, dim=1).flatten()
-                    log_prob = torch.stack(logp_list, dim=1).flatten()
-                    entropy = torch.stack(ent_list, dim=1).flatten()
-                    
-                else:
-                    # Non-temporal logic
-                    h_prev = None
-                    _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
-                        obs, actions, h_prev
-                    )
-                h_prev  = (
-                    batch["hidden_states"]
-                    if self.method in ("concept_actor_critic", "gvf") and self.temporal_encoding == "gru"
-                    else None
+                _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
+                    obs, actions, h_prev
                 )
 
                 _, values, log_prob, entropy, _, _, _ = self.policy.evaluate_actions(
@@ -697,6 +686,10 @@ class PPO:
         if self.method != "concept_actor_critic":
             return {}
 
+        # Use BPTT sequence training for GRU so gradients flow across time steps
+        if self.temporal_encoding == "gru":
+            return self._train_concept_ac_bptt()
+
         self.policy.set_training_mode(True)
         concept_net = self.policy.concept_net
         optimizer = self.policy.optimizer_concept_and_features
@@ -756,9 +749,24 @@ class PPO:
                 ac_loss2 = c_adv * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
                 actor_loss = -torch.min(ac_loss1, ac_loss2).mean()
 
-                # ---- Concept critic loss ----
+                # ---- Concept critic loss (PPO-style value clipping) ----
+                # Mirrors standard PPO: prevent V_c from jumping more than clip_range
+                # per update by taking the max of clipped and unclipped MSE losses.
                 c_ret = batch["concept_returns"]
-                critic_loss = F.mse_loss(V_c.flatten(), c_ret)
+                V_c_flat = V_c.flatten()
+                V_c_old  = batch["concept_values"]
+                V_c_clipped = V_c_old + torch.clamp(
+                    V_c_flat - V_c_old, -self.clip_range, self.clip_range
+                )
+                critic_loss = torch.max(
+                    F.mse_loss(V_c_flat,    c_ret),
+                    F.mse_loss(V_c_clipped, c_ret),
+                ).mean()
+
+                # ---- Concept actor entropy (mirrors ent_coef * ent_loss in train_policy) ----
+                concept_ent_loss = -torch.stack(
+                    [d.entropy() for d in concept_dists], dim=1
+                ).mean()
 
                 loss = actor_loss + self.lambda_v * critic_loss + self.ent_coef * concept_ent_loss
 
@@ -833,7 +841,7 @@ class PPO:
                 features = self.policy.extract_features(obs_b)
 
                 if self.method == "vanilla_freeze":
-                    logits = concept_net.get_logits(features)
+                    logits, _ = concept_net.get_logits(features, None)
                     loss   = concept_net.compute_loss(logits, c_b)
                 else:
                     # concept_actor_critic: supervised anchor weighted by lambda_s
@@ -865,32 +873,186 @@ class PPO:
     # helpers
     # ==================================================================
 
-    def _compute_concept_accuracy_from_buffer(self) -> dict:
+    # ==================================================================
+    # BPTT sequence training helpers
+    # ==================================================================
+
+    def _train_concepts_bptt(self, n_epochs: int = 1) -> dict:
         """
-        Evaluate concept prediction accuracy using the current rollout buffer.
+        Supervised concept training via BPTT over the full rollout sequence.
 
-        For GRU: evaluates sequentially — iterates over timesteps in order,
-        carrying h_t across steps per env, so the GRU sees proper temporal context.
-        Random-batch sampling breaks GRU hidden state continuity and gives
-        misleadingly low temporal concept accuracy.
-
-        For non-GRU methods: random batch sampling is fine (no hidden state).
+        Replaces random-batch train_concepts for GRU methods in joint mode.
+        Processes all N envs in parallel as sequences of T steps, resetting
+        h_t at episode boundaries.  Gradients flow back through the GRU
+        across time so it can learn to latch and maintain temporal concepts.
         """
         if not self.rollout_buffer.full:
             return {}
+
+        self.policy.set_training_mode(True)
+        buf = self.rollout_buffer
+        T, N = buf.buffer_size, buf.n_envs
+        concept_net = self.policy.concept_net
+        optimizer = self.policy.optimizer_concept_and_features
+        epoch_losses = []
+
+        for _ in range(n_epochs):
+            h_t = torch.zeros(N, concept_net.hidden_dim, device=self.device)
+            step_losses: List[torch.Tensor] = []
+
+            for t in range(T):
+                if buf.obs_is_dict:
+                    obs_t = {k: torch.as_tensor(buf.observations[k][t], dtype=torch.float32).to(self.device)
+                             for k in buf.observations}
+                else:
+                    obs_t = torch.as_tensor(buf.observations[t], dtype=torch.float32).to(self.device)
+
+                c_true_t = torch.as_tensor(buf.concepts[t], dtype=torch.float32).to(self.device)
+                ep_start = torch.as_tensor(
+                    buf.episode_starts[t], dtype=torch.float32, device=self.device
+                ).unsqueeze(1)
+                h_t = h_t * (1.0 - ep_start)
+
+                features = self.policy.extract_features(obs_t)
+
+                if self.method == "vanilla_freeze":
+                    logits, h_t = concept_net.get_logits(features, h_t)
+                    loss_t = concept_net.compute_loss(logits, c_true_t)
+                else:
+                    logits, h_t = concept_net.get_logits(features, h_t)
+                    loss_t = self.lambda_s * concept_net.compute_concept_loss(logits, c_true_t)
+
+                step_losses.append(loss_t)
+
+            total_loss = torch.stack(step_losses).mean()
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(self.policy.features_extractor.parameters()) +
+                list(concept_net.parameters()),
+                self.max_grad_norm,
+            )
+            optimizer.step()
+            epoch_losses.append(total_loss.item())
+
+        return {"concept_bptt_loss": float(np.mean(epoch_losses))}
+
+    def _train_concept_ac_bptt(self) -> dict:
+        """
+        PPO-style concept actor-critic update via BPTT over the rollout sequence.
+
+        Replaces the random-batch train_concept_actor_critic for GRU methods.
+        Same loss as the batch version but computed over the full T-step sequence
+        so the GRU receives gradients through time.
+        """
+        if not self.rollout_buffer.full:
+            return {}
+
+        self.policy.set_training_mode(True)
+        buf = self.rollout_buffer
+        T, N = buf.buffer_size, buf.n_envs
+        concept_net = self.policy.concept_net
+        optimizer = self.policy.optimizer_concept_and_features
+        actor_losses, critic_losses, ent_losses = [], [], []
+
+        for _ in range(self.concept_ac_epochs):
+            h_t = torch.zeros(N, concept_net.hidden_dim, device=self.device)
+            step_actor: List[torch.Tensor] = []
+            step_critic: List[torch.Tensor] = []
+            step_ent: List[torch.Tensor] = []
+
+            for t in range(T):
+                if buf.obs_is_dict:
+                    obs_t = {k: torch.as_tensor(buf.observations[k][t], dtype=torch.float32).to(self.device)
+                             for k in buf.observations}
+                else:
+                    obs_t = torch.as_tensor(buf.observations[t], dtype=torch.float32).to(self.device)
+
+                ep_start = torch.as_tensor(
+                    buf.episode_starts[t], dtype=torch.float32, device=self.device
+                ).unsqueeze(1)
+                h_t = h_t * (1.0 - ep_start)
+
+                features = self.policy.extract_features(obs_t)
+                c_pred, h_t, concept_dists, V_c = concept_net(features, h_t)
+
+                # Concept actor loss (PPO-clipped)
+                c_adv = torch.as_tensor(buf.concept_advantages[t], dtype=torch.float32, device=self.device)
+                if self.normalize_advantage and c_adv.numel() > 1:
+                    c_adv = (c_adv - c_adv.mean()) / (c_adv.std() + 1e-8)
+
+                old_clp = torch.as_tensor(buf.concept_log_probs[t], dtype=torch.float32, device=self.device)
+                new_clp = concept_net.concept_log_probs(concept_dists, c_pred)
+                ratio   = torch.exp(new_clp - old_clp)
+                ac_l1   = c_adv * ratio
+                ac_l2   = c_adv * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
+                step_actor.append(-torch.min(ac_l1, ac_l2).mean())
+
+                # Concept critic loss (clipped)
+                c_ret    = torch.as_tensor(buf.concept_returns[t], dtype=torch.float32, device=self.device)
+                V_c_flat = V_c.flatten()
+                V_c_old  = torch.as_tensor(buf.concept_values[t], dtype=torch.float32, device=self.device)
+                V_clipped = V_c_old + torch.clamp(V_c_flat - V_c_old, -self.clip_range, self.clip_range)
+                step_critic.append(torch.max(
+                    F.mse_loss(V_c_flat, c_ret),
+                    F.mse_loss(V_clipped, c_ret),
+                ))
+
+                # Concept entropy
+                step_ent.append(
+                    -torch.stack([d.entropy() for d in concept_dists], dim=1).mean()
+                )
+
+            total_loss = (
+                torch.stack(step_actor).mean()
+                + self.lambda_v  * torch.stack(step_critic).mean()
+                + self.ent_coef  * torch.stack(step_ent).mean()
+            )
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(self.policy.features_extractor.parameters()) +
+                list(concept_net.parameters()),
+                self.max_grad_norm,
+            )
+            optimizer.step()
+
+            actor_losses.append(torch.stack(step_actor).mean().item())
+            critic_losses.append(torch.stack(step_critic).mean().item())
+            ent_losses.append(torch.stack(step_ent).mean().item())
+
+        return {
+            "concept_actor_loss":  float(np.mean(actor_losses)),
+            "concept_critic_loss": float(np.mean(critic_losses)),
+            "concept_ent_loss":    float(np.mean(ent_losses)),
+        }
+
+    def _gather_concept_preds_from_buffer(self):
+        """
+        Run the concept network over the full rollout buffer (in order for GRU,
+        chunked for non-GRU) and return (c_pred_np, c_true_np, eval_mask_np)
+        already filtered to eval_mask > 0.
+
+        Used by both accuracy and MSE logging so they share the same samples
+        and the same GRU continuity treatment.
+        """
+        if not self.rollout_buffer.full:
+            return None, None, None
         self.policy.set_training_mode(False)
 
         T = self.rollout_buffer.buffer_size
         N = self.n_envs
 
         with torch.no_grad():
-            if self.method in ("concept_actor_critic", "gvf") and self.temporal_encoding == "gru":
-                # Sequential evaluation: carry h_t in order across timesteps
-                h_t = torch.zeros(N, self.hidden_dim, device=self.device)
-                all_pred, all_true = [], []
+            buf = self.rollout_buffer
+            all_pred, all_true = [], []
 
-                # Buffer stores obs as [T, N, *obs_shape] (before flattening)
-                buf = self.rollout_buffer
+            if self.temporal_encoding == "gru":
+                # Sequential evaluation for any GRU method: carry h_t in
+                # timestep order so the GRU sees proper temporal context.
+                # Both vanilla_freeze+gru and concept_ac+gru need this —
+                # chunked evaluation with h_prev=None breaks GRU continuity.
+                h_t = torch.zeros(N, self.hidden_dim, device=self.device)
                 for step in range(T):
                     if buf.obs_is_dict:
                         obs_t = {
@@ -903,46 +1065,75 @@ class PPO:
                             buf.observations[step], dtype=torch.float32
                         ).to(self.device)
 
-                    # Reset h_t at episode boundaries
                     ep_start = torch.as_tensor(
                         buf.episode_starts[step], dtype=torch.float32, device=self.device
                     ).unsqueeze(1)
                     h_t = h_t * (1.0 - ep_start)
 
                     features = self.policy.extract_features(obs_t)
-                    if self.method == "concept_actor_critic":
-                        c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
-                    else:
+                    if self.method == "vanilla_freeze":
                         c_pred, h_t = self.policy.concept_net(features, h_t)
-                        c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
+                    else:
+                        c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
                     all_pred.append(c_pred.cpu())
                     all_true.append(
                         torch.as_tensor(buf.concepts[step], dtype=torch.float32)
                     )
-
-                c_pred_np = torch.cat(all_pred, dim=0).numpy()   # [T*N, concept_dim]
-                c_true_np = torch.cat(all_true, dim=0).numpy()
             else:
-                # Non-GRU: random batch is fine
-                batch = next(iter(self.rollout_buffer.get(min(512, self.rollout_buffer.buffer_size))))
-                obs = batch["observations"]
-                c_true = batch["concepts"]
-                features = self.policy.extract_features(obs)
-                if self.method == "vanilla_freeze":
-                    c_pred = self.policy.concept_net(features)
-                elif self.method == "gvf":
-                    c_pred, _ = self.policy.concept_net(features, None)
-                    c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
-                else:
-                    c_pred, _, _, _ = self.policy.concept_net(features, None)
-                c_pred_np = c_pred.cpu().numpy()
-                c_true_np = c_true.cpu().numpy()
+                # Non-GRU: process full buffer in order in chunks.
+                T_buf, N_buf = buf.buffer_size, buf.n_envs
+                chunk = 256
+                for start in range(0, T_buf * N_buf, chunk):
+                    end = min(start + chunk, T_buf * N_buf)
+                    if buf.obs_is_dict:
+                        obs_flat = {
+                            k: torch.as_tensor(
+                                buf.observations[k].reshape(T_buf * N_buf, *buf.obs_shape[k])[start:end],
+                                dtype=torch.float32
+                            ).to(self.device)
+                            for k in buf.observations
+                        }
+                    else:
+                        obs_flat = torch.as_tensor(
+                            buf.observations.reshape(T_buf * N_buf, *buf.obs_shape)[start:end],
+                            dtype=torch.float32
+                        ).to(self.device)
+                    c_true_chunk = torch.as_tensor(
+                        buf.concepts.reshape(T_buf * N_buf, buf.concept_dim)[start:end],
+                        dtype=torch.float32
+                    )
+                    features = self.policy.extract_features(obs_flat)
+                    if self.method == "vanilla_freeze":
+                        c_pred_chunk, _ = self.policy.concept_net(features, None)
+                    else:
+                        c_pred_chunk, _, _, _ = self.policy.concept_net(features, None)
+                    all_pred.append(c_pred_chunk.cpu())
+                    all_true.append(c_true_chunk)
+
+            c_pred_np = torch.cat(all_pred, dim=0).numpy()   # [T*N, concept_dim]
+            c_true_np = torch.cat(all_true, dim=0).numpy()
 
         self.policy.set_training_mode(True)
 
+        # eval_mask: [T*N] — 1.0 only at steps where concept accuracy is
+        # decision-relevant (e.g. at the junction in TMaze).  All-ones for
+        # envs that don't expose concept_reward_active.
+        eval_mask_np = self.rollout_buffer.concept_eval_mask.reshape(-1)
+        keep = eval_mask_np > 0
+        return c_pred_np[keep], c_true_np[keep], eval_mask_np[keep]
+
+    def _compute_concept_accuracy_from_buffer(self) -> dict:
+        """
+        Per-concept metric over the rollout buffer, masked to decision-relevant
+        steps (classification → accuracy ↑, regression → MSE ↓).
+        """
+        c_pred_np, c_true_np, mask = self._gather_concept_preds_from_buffer()
+        if c_pred_np is None or len(c_pred_np) == 0:
+            return {}
         metrics = {}
         for i, (name, tt) in enumerate(zip(self.concept_names, self.policy.task_types)):
-            p, t = c_pred_np[:, i], c_true_np[:, i]
+            p = c_pred_np[:, i]
+            t = c_true_np[:, i]
             if tt == "classification":
                 # Append _accuracy to classification tasks
                 metrics[f"{name}_acc"] = float(np.mean(np.round(p) == np.round(t)))
@@ -952,27 +1143,13 @@ class PPO:
         return metrics
 
     def _compute_concept_mse_from_buffer(self) -> dict:
-        """Raw MSE per regression concept — scale-dependent but interpretable."""
-        if not self.rollout_buffer.full:
+        """
+        Raw MSE per regression concept over the same buffer samples used for
+        accuracy (sequential GRU eval, eval_mask applied).
+        """
+        c_pred_np, c_true_np, _ = self._gather_concept_preds_from_buffer()
+        if c_pred_np is None or len(c_pred_np) == 0:
             return {}
-        self.policy.set_training_mode(False)
-        with torch.no_grad():
-            batch = next(iter(self.rollout_buffer.get(min(512, self.rollout_buffer.buffer_size))))
-            obs    = batch["observations"]
-            c_true = batch["concepts"]
-            features = self.policy.extract_features(obs)
-            if self.method == "vanilla_freeze":
-                c_pred = self.policy.concept_net(features)
-            elif self.method == "gvf":
-                h = batch.get("hidden_states") if self.temporal_encoding == "gru" else None
-                c_pred, _ = self.policy.concept_net(features, h)
-                c_pred = c_pred[:, : self.rollout_buffer.concept_dim]
-            else:
-                h = batch.get("hidden_states")
-                c_pred, _, _, _ = self.policy.concept_net(features, h)
-            c_pred_np = c_pred.cpu().numpy()
-            c_true_np = c_true.cpu().numpy()
-        self.policy.set_training_mode(True)
         mse = {}
         for i, (name, tt) in enumerate(zip(self.concept_names, self.policy.task_types)):
             if tt == "regression":

@@ -155,7 +155,8 @@ class ActorCriticPolicy(nn.Module):
         self.concept_net: Optional[nn.Module] = None
         if method == "vanilla_freeze":
             self.concept_net = FlexibleMultiTaskNetwork(
-                features_dim, task_types, num_classes, temporal_concepts=temporal_concepts
+                features_dim, task_types, num_classes, temporal_concepts=temporal_concepts,
+                temporal_encoding=temporal_encoding,
             )
             mlp_input_dim = concept_dim          # integer concept vector → policy
         elif method == "concept_actor_critic":
@@ -286,7 +287,7 @@ class ActorCriticPolicy(nn.Module):
             latent = self.mlp_extractor(features)
             c_t = None
         elif self.method == "vanilla_freeze":
-            c_t = self.concept_net(features)          # [B, concept_dim]
+            c_t, h_new = self.concept_net(features, h_prev)   # [B, concept_dim], h_t or None
             latent = self.mlp_extractor(c_t)
         elif self.method == "concept_actor_critic":
             c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)

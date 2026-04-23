@@ -78,7 +78,8 @@ class RolloutBuffer:
         self.hidden_states   = np.zeros((T, N, self.hidden_dim),  dtype=np.float32)
         self.concept_values  = np.zeros((T, N),                   dtype=np.float32)
         self.concept_log_probs = np.zeros((T, N),                 dtype=np.float32)
-        self.concept_rewards = np.zeros((T, N),                   dtype=np.float32)
+        self.concept_rewards   = np.zeros((T, N),                   dtype=np.float32)
+        self.concept_eval_mask = np.ones((T, N),                    dtype=np.float32)
         self.actions         = np.zeros((T, N, self.action_dim),  dtype=np.float32)
         self.rewards         = np.zeros((T, N),                   dtype=np.float32)
         self.values          = np.zeros((T, N),                   dtype=np.float32)
@@ -114,6 +115,7 @@ class RolloutBuffer:
         concept_value: Optional[torch.Tensor] = None,
         concept_log_prob: Optional[np.ndarray] = None,
         concept_reward: Optional[np.ndarray] = None,
+        concept_eval_mask: Optional[np.ndarray] = None,
     ) -> None:
         t = self.pos
         N = self.n_envs
@@ -139,6 +141,8 @@ class RolloutBuffer:
             self.concept_log_probs[t] = np.array(concept_log_prob).reshape(N)
         if concept_reward is not None:
             self.concept_rewards[t] = np.array(concept_reward).reshape(N)
+        if concept_eval_mask is not None:
+            self.concept_eval_mask[t] = np.array(concept_eval_mask).reshape(N)
 
         self.pos += 1
         if self.pos == self.buffer_size:

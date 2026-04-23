@@ -45,7 +45,6 @@ METHOD_COLORS = {
     "no_concept":           "#1f77b4",
     "vanilla_freeze":       "#ff7f0e",
     "concept_actor_critic": "#2ca02c",
-    "gvf":                  "#9327d6",
 }
 
 # Directory name format: <method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>
@@ -161,12 +160,14 @@ def smooth(values: np.ndarray, window: int = 20) -> np.ndarray:
 def _run_label(method: str, training_mode: str, temporal_encoding: str) -> str:
     base = METHOD_LABELS.get(method, method)
     extras = []
-    if method == "concept_actor_critic":
+    if temporal_encoding != "none":
         extras.append(temporal_encoding)
     if training_mode == "end_to_end":
         extras.append("e2e")
     elif training_mode == "joint":
         extras.append("joint")
+    elif training_mode == "two_phase":
+        extras.append("two_phase")
     if extras:
         return f"{base} ({', '.join(extras)})"
     return base
@@ -192,7 +193,7 @@ def _run_color(method: str, training_mode: str, temporal_encoding: str) -> str:
 # Plots
 # ---------------------------------------------------------------------------
 
-def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
+def plot_learning_curves(runs: Dict, out_dir: str, env: str, window: int = 30) -> None:
     fig, ax = plt.subplots(figsize=(11, 6))
 
     plotted = False
@@ -229,9 +230,10 @@ def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
         plt.close(fig)
         return
 
+
     ax.set_xlabel("Episode", fontsize=12)
-    ax.set_ylabel("Reward", fontsize=13)
-    ax.set_title("Learning Curves", fontsize=14)
+    ax.set_ylabel("Episode reward  (↑ higher is better)", fontsize=13)
+    ax.set_title(f"Learning Curves — {env}", fontsize=14)
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -361,7 +363,7 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
     print(f"[plot] saved → {path}")
 
 
-def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
+def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str, env: str) -> None:
     """
     Final concept accuracy bar chart, one bar per concept, grouped by method.
     Uses the last checkpoint in concept_acc.npz.
@@ -550,9 +552,9 @@ def main() -> None:
     )
     print(f"\n[plot] found {total} completed runs. generating plots → {args.output_dir}\n")
 
-    plot_learning_curves(runs, args.output_dir, window=args.smooth_window)
-    plot_concept_accuracy_over_time(runs, args.output_dir)
-    plot_concept_accuracy_per_concept(runs, args.output_dir)
+    plot_learning_curves(runs, args.output_dir, env=args.env, window=args.smooth_window)
+    plot_concept_accuracy_over_time(runs, args.output_dir, env=args.env)
+    plot_concept_accuracy_per_concept(runs, args.output_dir, env=args.env)
     write_summary_table(runs, args.output_dir)
     write_run_index(runs, args.output_dir)
 
