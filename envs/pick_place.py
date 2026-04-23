@@ -67,6 +67,7 @@ class DiscretizePandaActionWrapper(gym.ActionWrapper):
 class PandaPickPlaceConceptEnv(gym.Wrapper):
     def __init__(self, env: gym.Env, max_force_threshold: float = 50.0, force_range: tuple = (20.0, 100.0)):
         super().__init__(env)
+        self.concept_reward_active = True
         self.max_force_threshold = max_force_threshold
         self.force_range = force_range 
         self.current_max_force = 50.0  

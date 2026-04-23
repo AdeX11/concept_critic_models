@@ -55,7 +55,7 @@ python train.py \
 PID2=$!
 
 python train.py \
-    --method gvf \
+    --method concept_actor_critic \
     --training_mode end_to_end \
     --temporal_encoding none \
     --env $ENV --seed $SEED \

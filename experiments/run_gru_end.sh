@@ -1,20 +1,20 @@
 #!/bin/bash
 # Methods: PPO, Vanilla CBM, Concept Actor-Critic, GVF
-# Config: Two-Phase, No Temporal Encoding
+# Config: End-to-End, No Temporal Encoding
 
 set -e
 
-ENV="highway" 
+ENV="pick_place" 
 STATE=true    
 
 if [ "$ENV" = "highway" ]; then ENV_SHORT="hw"; else ENV_SHORT="pp"; fi
 if [ "$STATE" = "true" ]; then STATE_SHORT="state"; STATE_ARG="--state"; else STATE_SHORT="pixels"; STATE_ARG=""; fi
 
 RUN_NAME="${ENV_SHORT}_${STATE_SHORT}"
-RESULTS_DIR="results/none_two_phase/$RUN_NAME"
-PLOTS_DIR="plots/none_two_phase/$RUN_NAME"
+RESULTS_DIR="results/gru_end/$RUN_NAME"
+PLOTS_DIR="plots/gru_end/$RUN_NAME"
 
-TS=500000
+TS=20000
 N_ENVS=6
 SEED=42
 
@@ -34,8 +34,8 @@ PID0=$!
 
 python train.py \
     --method vanilla_freeze \
-    --training_mode two_phase \
-    --temporal_encoding none \
+    --training_mode end_to_end \
+    --temporal_encoding gru \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -45,8 +45,8 @@ PID1=$!
 
 python train.py \
     --method concept_actor_critic \
-    --training_mode two_phase \
-    --temporal_encoding none \
+    --training_mode end_to_end \
+    --temporal_encoding gru \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -55,8 +55,8 @@ python train.py \
 PID2=$!
 
 python train.py \
-    --method gvf \
-    --training_mode two_phase \
+    --method concept_actor_critic \
+    --training_mode end_to_end \
     --temporal_encoding none \
     --env $ENV --seed $SEED \
     $STATE_ARG \
