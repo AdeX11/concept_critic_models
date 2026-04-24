@@ -50,6 +50,9 @@ class PPO:
       - gvf
     """
 
+    # Two discount factors trained per GVF cumulant (one head each).
+    GVF_GAMMAS: Tuple[float, ...] = (0.5, 0.9)
+
     def __init__(
         self,
         method: str,
@@ -104,9 +107,15 @@ class PPO:
         concept_dim = int(policy_kwargs["concept_dim"])
         gvf_pairing_from_kwargs = policy_kwargs.pop("gvf_pairing", None)
         if gvf_pairing_from_kwargs is not None:
-            self.gvf_pairing = list(gvf_pairing_from_kwargs)
+            _original_pairing = list(gvf_pairing_from_kwargs)
         else:
-            self.gvf_pairing = list(range(concept_dim))
+            _original_pairing = list(range(concept_dim))
+        # Expand: one head per (cumulant, gamma) pair, grouped by gamma.
+        # e.g. original=[0,1] → gvf_pairing=[0,1,0,1], gvf_gammas=[0.5,0.5,0.9,0.9]
+        self.gvf_pairing = _original_pairing * len(self.GVF_GAMMAS)
+        self.gvf_gammas: List[float] = [
+            g for g in self.GVF_GAMMAS for _ in _original_pairing
+        ]
 
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -516,11 +525,14 @@ class PPO:
         """
         Train GVF heads to predict discounted cumulant expectations.
 
-        Each GVF head j is paired with one concept index via gvf_pairing[j].
-        The paired concept value in rollout_buffer.concepts is treated as the
-        cumulant c_t, and the training target is:
+        For each concept in the original gvf_pairing, two heads are trained —
+        one per discount factor in GVF_GAMMAS (default 0.5 and 0.9).  Heads are
+        grouped by gamma: heads 0..K-1 use GVF_GAMMAS[0], heads K..2K-1 use
+        GVF_GAMMAS[1], etc.
 
-          G_t = c_t + gamma * (1 - done_t) * G_{t+1}
+        The training target for head j (gamma g, cumulant concept c) is:
+
+          G_t = c_t + g * (1 - done_t) * G_{t+1}
 
         where done_t is inferred from episode starts at the next step.
         """
@@ -544,7 +556,9 @@ class PPO:
 
         T = self.rollout_buffer.buffer_size
         N = self.rollout_buffer.n_envs
-        num_gvf = len(self.gvf_pairing)
+        num_gvf = len(self.gvf_pairing)          # 2 * K (expanded)
+        num_gammas = len(self.GVF_GAMMAS)
+        num_gvf_per_gamma = num_gvf // num_gammas  # K
         concept_dim = self.rollout_buffer.concept_dim
 
         # Convert pairing to concept indices (STRICTLY 0-based).
@@ -561,17 +575,24 @@ class PPO:
         concepts = self.rollout_buffer.concepts  # [T, N, concept_dim]
         episode_starts = self.rollout_buffer.episode_starts  # [T, N]
 
-        # Build discounted targets G_t for each GVF head and env.
-        gvf_targets = np.zeros((T, N, num_gvf), dtype=np.float32)
-        running = np.zeros((N, num_gvf), dtype=np.float32)
-        for step in reversed(range(T)):
-            if step < T - 1:
-                # If next step starts a new episode, bootstrap is zero.
-                running *= (1.0 - episode_starts[step + 1])[:, None]
-            # Two-step index → [N, num_gvf]; concepts[step,:,idx] is [num_gvf,N] in numpy.
-            cumulants_t = concepts[step][:, pairing_indices]
-            running = cumulants_t + self.gamma * running
-            gvf_targets[step] = running
+        # Build discounted targets G_t per gamma, then concatenate along head axis.
+        # Heads are grouped: first K heads use GVF_GAMMAS[0], next K use GVF_GAMMAS[1], …
+        all_targets = []
+        for g_idx, gamma_g in enumerate(self.GVF_GAMMAS):
+            pi = pairing_indices[g_idx * num_gvf_per_gamma : (g_idx + 1) * num_gvf_per_gamma]
+            targets_g = np.zeros((T, N, num_gvf_per_gamma), dtype=np.float32)
+            running_g = np.zeros((N, num_gvf_per_gamma), dtype=np.float32)
+            for step in reversed(range(T)):
+                if step < T - 1:
+                    # If next step starts a new episode, bootstrap is zero.
+                    running_g *= (1.0 - episode_starts[step + 1])[:, None]
+                cumulants_t = concepts[step][:, pi]
+                running_g = cumulants_t + gamma_g * running_g
+                targets_g[step] = running_g
+            all_targets.append(targets_g)
+
+        # gvf_targets: [T, N, num_gvf] with heads grouped by gamma
+        gvf_targets = np.concatenate(all_targets, axis=2)
 
         # Match RolloutBuffer flattening order: [T, N, ...] -> [T*N, ...].
         gvf_targets_flat = gvf_targets.swapaxes(0, 1).reshape(T * N, num_gvf)

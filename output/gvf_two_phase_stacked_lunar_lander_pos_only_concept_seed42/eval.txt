@@ -1,2 +1,2 @@
-mean_reward=-141.9522
-std_reward=147.0255
+mean_reward=-125.0562
+std_reward=26.4884

@@ -127,7 +127,7 @@ def main() -> None:
     parser.add_argument("--n_steps",           type=int,   default=512)
     parser.add_argument("--n_epochs",          type=int,   default=10)
     parser.add_argument("--batch_size",        type=int,   default=256)
-    parser.add_argument("--learning_rate",     type=float, default=3e-4)
+    parser.add_argument("--learning_rate",     type=float, default=5e-6)
     parser.add_argument("--ent_coef",          type=float, default=0.01)
     parser.add_argument("--vf_coef",           type=float, default=0.5)
     parser.add_argument("--lambda_v",          type=float, default=0.5,

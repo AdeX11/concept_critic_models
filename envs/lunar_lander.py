@@ -271,6 +271,8 @@ class LunarLanderPosOnlyConceptEnv(gym.Wrapper):
         obs, reward, done, truncated, info = self.env.step(action)
         self.current_concept = self._pos_obs(np.array(obs, dtype=np.float32))
         info["concept"] = self.current_concept.copy()
+        if reward > 10:
+            print(f"Positive reward: {reward:.4f}")
         return self._pos_obs(obs), reward, done, truncated, info
 
 
@@ -315,7 +317,7 @@ def make_lunar_lander_state_env(n_envs: int = 4, seed: int = 0, **_) -> gym.Env:
 
 
 def make_single_lunar_lander_state_env(seed: int = 0, **_) -> LunarLanderStateEnv:
-    env = gym.make("LunarLander-v3")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
     env = LunarLanderStateEnv(env)
     env.reset(seed=seed)
     return env
@@ -337,7 +339,7 @@ def make_lunar_lander_pos_only_env(n_envs: int = 4, seed: int = 0, **_) -> gym.E
 
 
 def make_single_lunar_lander_pos_only_env(seed: int = 0, **_) -> LunarLanderPosOnlyEnv:
-    env = gym.make("LunarLander-v3")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
     env = LunarLanderPosOnlyEnv(env)
     env.reset(seed=seed)
     return env
@@ -358,7 +360,7 @@ def make_lunar_lander_pos_only_concept_env(n_envs: int = 4, seed: int = 0, **_) 
 
 
 def make_single_lunar_lander_pos_only_concept_env(seed: int = 0, **_) -> LunarLanderPosOnlyConceptEnv:
-    env = gym.make("LunarLander-v3")
+    env = gym.make("LunarLander-v3", render_mode="rgb_array")
     env = LunarLanderPosOnlyConceptEnv(env)
     env.reset(seed=seed)
     return env
