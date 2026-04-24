@@ -4,17 +4,17 @@
 
 set -e
 
-ENV="highway" 
+ENV="pick_place" 
 STATE=true    
 
 if [ "$ENV" = "highway" ]; then ENV_SHORT="hw"; else ENV_SHORT="pp"; fi
 if [ "$STATE" = "true" ]; then STATE_SHORT="state"; STATE_ARG="--state"; else STATE_SHORT="pixels"; STATE_ARG=""; fi
 
 RUN_NAME="${ENV_SHORT}_${STATE_SHORT}"
-RESULTS_DIR="results/none_end/$RUN_NAME"
-PLOTS_DIR="plots/none_end/$RUN_NAME"
+RESULTS_DIR="results/none_joint/$RUN_NAME"
+PLOTS_DIR="plots/none_joint/$RUN_NAME"
 
-TS=500000
+TS=100000
 N_ENVS=6
 SEED=42
 
@@ -34,7 +34,7 @@ PID0=$!
 
 python train.py \
     --method vanilla_freeze \
-    --training_mode end_to_end \
+    --training_mode joint \
     --temporal_encoding none \
     --env $ENV --seed $SEED \
     $STATE_ARG \
@@ -45,7 +45,7 @@ PID1=$!
 
 python train.py \
     --method concept_actor_critic \
-    --training_mode end_to_end \
+    --training_mode joint \
     --temporal_encoding none \
     --env $ENV --seed $SEED \
     $STATE_ARG \
@@ -54,18 +54,18 @@ python train.py \
     --output_dir $RESULTS_DIR &
 PID2=$!
 
-python train.py \
-    --method concept_actor_critic \
-    --training_mode end_to_end \
-    --temporal_encoding none \
-    --env $ENV --seed $SEED \
-    $STATE_ARG \
-    --total_timesteps $TS --n_envs $N_ENVS \
-    --device cpu \
-    --output_dir $RESULTS_DIR &
-PID3=$!
+# python train.py \
+#     --method concept_actor_critic \
+#     --training_mode joint \
+#     --temporal_encoding none \
+#     --env $ENV --seed $SEED \
+#     $STATE_ARG \
+#     --total_timesteps $TS --n_envs $N_ENVS \
+#     --device cpu \
+#     --output_dir $RESULTS_DIR &
+# PID3=$!
 
-wait $PID0 $PID1 $PID2 $PID3
+wait $PID0 $PID1 $PID2
 echo "Training done."
 
 python plot_results.py --env $ENV $STATE_ARG --results_dir $RESULTS_DIR --output_dir $PLOTS_DIR

@@ -1,32 +1,31 @@
 """
-Highway Environment Concept Wrapper and Tests
+Roundabout Environment Concept Wrapper (Hard Mode)
 ===================================================
-
-This script adapts the Farama Foundation's `highway-env` for the ConceptActorCritic.
-It turns a standard driving simulation into a Partially Observable Markov Decision 
-Process (POMDP) by extracting both observable kinematics and hidden behavioral 
-parameters into a complete Concept Bottleneck.
-
-The Concepts per NPC (5 x 4 = 20 total) are as follows:
-------------------------------------
-1. Aggressiveness (Temporal Regression) - Latent: 0.0 to 1.0 behavior profile.
-2. Relative X-Position (Static Regression) - Observable: Distance in meters.
-3. Relative Lane (Static Classification) - Observable: 0 = Left, 1 = Same, 2 = Right.
-4. Relative Speed (Static Regression) - Observable: Difference in velocity (m/s).
-5. Acceleration (Temporal Regression) - Latent: Change in speed from the previous frame.
+Features:
+1. Limited FOV: NPCs outside a 180° forward cone are masked (obs and concept = 0).
+2. Latent Physics: TTC removed. Agent must derive closing rates via GRU memory.
+3. Stable Tracking: Uses the underlying simulation IDs to ensure concept slots
+   don't "flicker" when cars move in/out of the FOV.
 """
 
-import argparse
 import gymnasium as gym
 import numpy as np
-from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector import SyncVectorEnv
 import highway_env 
+from highway_env.envs.roundabout_env import RoundaboutEnv
+from highway_env.vehicle.controller import ControlledVehicle
+from highway_env.utils import class_from_path
 
-class HighwayConceptWrapper(gym.Wrapper):
-    def __init__(self, env):
+class RoundaboutConceptWrapper(gym.Wrapper):
+    def __init__(self, env, fov_deg=180):
         super().__init__(env)
+
+        if "other_vehicles_type" not in self.config:
+            self.config["other_vehicles_type"] = \
+                "highway_env.vehicle.behavior.IDMVehicle"
         
-        # highway-env usually outputs a V x F matrix (e.g., 5 vehicles, 5 features)
+        self.fov_rad = np.deg2rad(fov_deg)
+        
         original_shape = self.env.observation_space.shape
         self.obs_dim = np.prod(original_shape)
         
@@ -34,15 +33,11 @@ class HighwayConceptWrapper(gym.Wrapper):
             low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
         )
         
-        # Track 1 Ego + N closest NPCs
+        # We reduce to 4 core concepts per NPC (Removing TTC)
         self.num_npc = original_shape[0] - 1
-        self.concepts_per_npc = 5  # Expanded to include Speed and Acceleration
+        self.concepts_per_npc = 4 
         self.concept_dim = self.num_npc * self.concepts_per_npc
-        self.tracked_slots = [None] * self.num_npc
 
-        # ---------------------------------------------------------
-        # CBM API PROPERTIES
-        # ---------------------------------------------------------
         self.task_types = []
         self.num_classes = []
         self.concept_names = []
@@ -50,283 +45,265 @@ class HighwayConceptWrapper(gym.Wrapper):
         
         for i in range(self.num_npc):
             idx = i * self.concepts_per_npc
-            
-            # 1. Aggressiveness (Latent / Temporal)
-            self.task_types.append("regression")
-            self.num_classes.append(0)
-            self.concept_names.append(f"npc_{i+1}_aggress")
-            self.temporal_concepts.append(idx) 
-            
-            # 2. Relative X Position (Observable / Static)
-            self.task_types.append("regression")
-            self.num_classes.append(0)
-            self.concept_names.append(f"npc_{i+1}_x")
-            
-            # 3. Relative Lane (Observable / Static)
-            self.task_types.append("classification")
-            self.num_classes.append(3)
-            self.concept_names.append(f"npc_{i+1}_lane")
-
-            # 4. Relative Speed (Observable / Static)
-            self.task_types.append("regression")
-            self.num_classes.append(0)
-            self.concept_names.append(f"npc_{i+1}_speed")
-
-            # 5. Acceleration (Latent / Temporal)
-            # The GRU must compare current speed against its memory of past speed.
-            self.task_types.append("regression")
-            self.num_classes.append(0)
-            self.concept_names.append(f"npc_{i+1}_accel")
-            self.temporal_concepts.append(idx + 4)
+            # 1. Dist, 2. Angle, 3. Lane, 4. Speed
+            self.task_types.extend(["regression", "regression", "classification", "regression"])
+            self.num_classes.extend([0, 0, 2, 0])
+            self.concept_names.extend([
+                f"npc_{i+1}_dist", f"npc_{i+1}_angle", 
+                f"npc_{i+1}_lane", f"npc_{i+1}_speed"
+            ])
+            # Distance and Speed are temporal because their DERIVATIVE (accel/TTC) is latent
+            self.temporal_concepts.extend([idx, idx + 3])
         
-        # State tracker
         self.current_concept = np.zeros(self.concept_dim, dtype=np.float32)
 
-        # FIX: Patch CBM properties onto the unwrapped env for VectorEnv compatibility
-        self.env.unwrapped.task_types = self.task_types
-        self.env.unwrapped.num_classes = self.num_classes
-        self.env.unwrapped.concept_names = self.concept_names
-        self.env.unwrapped.temporal_concepts = self.temporal_concepts
+    def __getattr__(self, name):
+        return getattr(self.env, name)
 
-    # ---------------------------------------------------------
-    # VECTOR ENVIRONMENT PROPERTIES
-    # ---------------------------------------------------------
-    @property
-    def single_action_space(self):
-        return self.env.single_action_space
-
-    @property
-    def single_observation_space(self):
-        return self.env.single_observation_space
-
-    def get_concept(self) -> np.ndarray:
-        """Returns the current concepts, required by the CBM extraction logic."""
-        return self.current_concept.copy()
-        
-    # ---------------------------------------------------------
-    # CORE ENVIRONMENT LOOP
-    # ---------------------------------------------------------
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        
-        # Inject hidden parameters into all spawned NPC vehicles
-        for vehicle in self.env.unwrapped.road.vehicles:
-            if vehicle is not self.env.unwrapped.vehicle:  
-                # 1. Inject Aggressiveness
-                aggressiveness = np.random.uniform(0.0, 1.0)
-                vehicle.aggressiveness = aggressiveness 
-                vehicle.target_speed = 20.0 + (aggressiveness * 15.0) 
-                
-                # 2. Initialize Speed Tracking (for Acceleration)
-                vehicle._previous_speed = vehicle.speed
-                
-                if hasattr(vehicle, 'distance_wanted'):
-                    vehicle.distance_wanted = 2.0 + ((1.0 - aggressiveness) * 8.0)
-                    
-        flat_obs, concepts = self._assemble_obs_and_concepts(obs)
-        
-        # Update state and info dict
+        flat_obs, concepts = self._apply_fov_and_assemble(obs)
         self.current_concept = concepts
         info["concept"] = self.current_concept.copy()
-        
         return flat_obs, info
         
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        
-        # If new cars spawned during the step, give them personalities and trackers
-        for vehicle in self.env.unwrapped.road.vehicles:
-            if vehicle is not self.env.unwrapped.vehicle and not hasattr(vehicle, 'aggressiveness'):
-                aggress = np.random.uniform(0.0, 1.0)
-                vehicle.aggressiveness = aggress
-                vehicle.target_speed = 20.0 + (aggress * 15.0)
-                vehicle._previous_speed = vehicle.speed
-        
-        flat_obs, concepts = self._assemble_obs_and_concepts(obs)
-        
-        # Update state and info dict
+        flat_obs, concepts = self._apply_fov_and_assemble(obs)
         self.current_concept = concepts
         info["concept"] = self.current_concept.copy()
-        
         return flat_obs, reward, terminated, truncated, info
         
-    def _assemble_obs_and_concepts(self, obs):
-        # obs is usually a 2D matrix 
-        # Row 0 is the Ego car. Rows 1 through 4 are the NPCs.
-        # Columns are usually: [presence, x, y, vx, vy]
-        
-        flat_obs = obs.flatten().astype(np.float32)
+    def _apply_fov_and_assemble(self, obs):
+        """
+        Masks NPCs outside the FOV and builds the concept vector.
+        obs shape: (V, F) where row 0 is Ego.
+        """
+        # We work on a copy to mask the 'flat_obs' sent to the model
+        masked_obs = obs.copy()
         concepts = np.zeros(self.concept_dim, dtype=np.float32)
         
-        ego = self.env.unwrapped.vehicle
-        all_vehicles = self.env.unwrapped.road.vehicles
-        
         for i in range(self.num_npc):
-            row = i + 1  # Skip the Ego car (row 0)
+            row = i + 1 
             idx = i * self.concepts_per_npc
             
-            # If there is no car in this slot (presence feature is 0), skip it
-            if obs[row, 0] == 0:
-                continue
+            if obs[row, 0] == 0: continue
                 
-            # ---------------------------------------------------------
-            # OBSERVABLE CONCEPTS: Pull straight from the matrix!
-            # ---------------------------------------------------------
-            rel_x = obs[row, 1]      # The exact X value the network sees
-            rel_y = obs[row, 2]      # The exact Y value the network sees
-            rel_speed = obs[row, 3]  # The exact Speed value the network sees
+            rel_x = obs[row, 1]
+            rel_y = obs[row, 2]
             
-            concepts[idx + 1] = rel_x
+            # Calculate angle relative to Ego heading
+            # In highway-env, x is forward, y is lateral
+            angle = np.arctan2(rel_y, rel_x)
             
-            # Categorize the lane based on the normalized Y value
-            if rel_y < -0.1: concepts[idx + 2] = 0.0     # Left
-            elif rel_y > 0.1: concepts[idx + 2] = 2.0    # Right
-            else: concepts[idx + 2] = 1.0                # Same
-            
-            concepts[idx + 3] = rel_speed
+            # --- FOV CHECK (180 degree forward cone) ---
+            # If angle is > 90 deg or < -90 deg, it's behind us.
+            if abs(angle) > (self.fov_rad / 2):
+                masked_obs[row, :] = 0 # Agent sees nothing for this NPC
+                continue 
 
-            # ---------------------------------------------------------
-            # LATENT CONCEPTS: "Reverse Lookup"
-            # ---------------------------------------------------------
+            # 1. Distance
+            dist = np.sqrt(rel_x**2 + rel_y**2)
+            concepts[idx] = dist
             
-            matched_vehicle = None
-            for v in all_vehicles:
-                if v is not ego:
-                    # Check if this vehicle's relative speed matches the observation
-                    if abs((v.speed - ego.speed) / 20.0 - rel_speed) < 0.1: 
-                        matched_vehicle = v
-                        break
+            # 2. Angle
+            concepts[idx + 1] = angle
             
-            if matched_vehicle:
-                concepts[idx] = getattr(matched_vehicle, 'aggressiveness', 0.5)
-                
-                # Acceleration calculation
-                prev_speed = getattr(matched_vehicle, '_previous_speed', matched_vehicle.speed)
-                concepts[idx + 4] = matched_vehicle.speed - prev_speed
-                matched_vehicle._previous_speed = matched_vehicle.speed
+            # 3. Radial Lane
+            concepts[idx + 2] = 1.0 if abs(rel_y) > 0.1 else 0.0
+            
+            # 4. Relative Speed Magnitude
+            rel_vx = obs[row, 3]
+            rel_vy = obs[row, 4]
+            concepts[idx + 3] = np.sqrt(rel_vx**2 + rel_vy**2)
 
-        return flat_obs, concepts
+        return masked_obs.flatten().astype(np.float32), concepts
+
+
+class CongestedRoundaboutEnv(RoundaboutEnv):
+    """
+    Roundabout with aggressive congestion:
+    - High vehicle count
+    - Tight spacing
+    - Continuous spawning
+    """
+
+    def _make_vehicles(self):
+        super()._make_vehicles()  # ✅ build road + base vehicles FIRST
+
+        from highway_env.utils import class_from_path
+        vehicle_class = class_from_path(self.config["other_vehicles_type"])
+
+        # Add extra vehicles ON TOP of working base env
+        for _ in range(25):
+            lanes = self.np_random.choice([
+                ("ser", "ses", 0),
+                ("eer", "ees", 0),
+                ("ner", "nes", 0),
+                ("wer", "wes", 0),
+            ])
+            lane_index = lanes[self.np_random.integers(len(lanes))]
+            lane = self.road.network.get_lane(lane_index)
+
+            vehicle = vehicle_class(
+                self.road,
+                lane.position(self.np_random.uniform(90, 120), 0),  # 🔥 visible zone
+                speed=self.np_random.uniform(4, 10)
+            )
+
+            if not any(np.linalg.norm(v.position - vehicle.position) < 5
+                    for v in self.road.vehicles):
+                self.road.vehicles.append(vehicle)
+
+    def _spawn_vehicle(self, close_spacing=False):
+        """Spawn vehicles from all entries with tighter gaps"""
+        lanes = [
+            ("ser", "ses", 0),
+            ("eer", "ees", 0),
+            ("ner", "nes", 0),
+            ("wer", "wes", 0),
+        ]
+
+        lane_index = lanes[self.np_random.integers(len(lanes))]
+        lane = self.road.network.get_lane(lane_index)
+
+        # --- tighter spacing ---
+        if close_spacing:
+            longitudinal = self.np_random.uniform(0, 30)  # 🔥 dense cluster
+        else:
+            longitudinal = self.np_random.uniform(0, 80)
+
+        vehicle_class = class_from_path(self.config["other_vehicles_type"])
+        vehicle = vehicle_class(
+            self.road,
+            lane.position(longitudinal, 0),
+            speed=self.np_random.uniform(4, 10)
+        )
+
+        # Avoid immediate collisions at spawn
+        if (
+            not any(np.linalg.norm(v.position - vehicle.position) < 5
+                    for v in self.road.vehicles)
+            or self.np_random.random() < 0.2  # allow occasional tight spawn
+        ):
+            self.road.vehicles.append(vehicle)
+
+    def step(self, action):
+        """Keep injecting vehicles over time (traffic flow)"""
+        obs, reward, terminated, truncated, info = super().step(action)
+
+        # continuous inflow
+        if self.np_random.random() < 0.6:
+            self._spawn_vehicle(close_spacing=True)
+
+        return obs, reward, terminated, truncated, info
 
 # ---------------------------------------------------------------------------
-# Factory Functions (For PPO/Training)
+# Factory Functions (Vectorized for Training)
 # ---------------------------------------------------------------------------
-
-def make_single_highway_env(seed=0):
-    env = gym.make("highway-fast-v0", render_mode="rgb_array")
-    env = HighwayConceptWrapper(env)
-    env.action_space.seed(seed)
-    return env
-
-def make_single_highway_state_env(seed=0):
-    env = gym.make("highway-fast-v0")
-    env = HighwayConceptWrapper(env)
-    env.action_space.seed(seed)
-    return env
 
 def make_highway_env(n_envs: int = 4, seed: int = 0):
-    def _make(rank: int):
-        def _init():
-            env = gym.make("highway-fast-v0", render_mode="rgb_array")
-            env = HighwayConceptWrapper(env)
-            env.action_space.seed(seed + rank)
-            return env
-        return _init
-    venv = AsyncVectorEnv([_make(i) for i in range(n_envs)])
+    def _init():
+        env = CongestedRoundaboutEnv()
+        
+        # Keep your observation config (this still matters!)
+        env.configure({
+            "observation": {
+                "type": "Kinematics",
+                "vehicles_count": 5,
+                "features": ["presence", "x", "y", "vx", "vy"],
+                "absolute": False,
+                "order": "sorted"
+            }
+        })
 
-    # THE FIX: Extract properties from a dummy env and patch them onto the VectorEnv
-    dummy = _make(0)()
-    venv.task_types = dummy.task_types
-    venv.num_classes = dummy.num_classes
-    venv.concept_names = dummy.concept_names
-    venv.temporal_concepts = dummy.temporal_concepts
-    venv.concept_dim = dummy.concept_dim
-    dummy.close()
+        env.reset()
+        env = RoundaboutConceptWrapper(env)
+        return env
 
-    return venv
+    return SyncVectorEnv([_init for _ in range(n_envs)])
 
 def make_highway_state_env(n_envs: int = 4, seed: int = 0):
-    def _make(rank: int):
-        def _init():
-            env = gym.make("highway-fast-v0")
-            env = HighwayConceptWrapper(env)
-            env.action_space.seed(seed + rank)
-            return env
-        return _init
-    
-    venv = AsyncVectorEnv([_make(i) for i in range(n_envs)])
+    def _init():
+        env = CongestedRoundaboutEnv()
+        
+        # Keep your observation config (this still matters!)
+        env.configure({
+            "observation": {
+                "type": "Kinematics",
+                "vehicles_count": 5,
+                "features": ["presence", "x", "y", "vx", "vy"],
+                "absolute": False,
+                "order": "sorted"
+            }
+        })
 
-    # THE FIX: Extract properties from a dummy env and patch them onto the VectorEnv
-    dummy = _make(0)()
-    venv.task_types = dummy.task_types
-    venv.num_classes = dummy.num_classes
-    venv.concept_names = dummy.concept_names
-    venv.temporal_concepts = dummy.temporal_concepts
-    venv.concept_dim = dummy.concept_dim
-    dummy.close()
+        env.reset()
+        env = RoundaboutConceptWrapper(env)
+        return env
 
-    return venv
+    return SyncVectorEnv([_init for _ in range(n_envs)])
+
+def make_single_highway_env(seed: int = 0):
+    env = CongestedRoundaboutEnv(render_mode="human")
+    env.reset(seed=seed)
+    env = RoundaboutConceptWrapper(env)
+    print(len(env.unwrapped.road.vehicles))
+    return env
+
+def make_single_highway_state_env(seed: int = 0):
+    env = CongestedRoundaboutEnv()
+    env.reset(seed=seed)
+    env = RoundaboutConceptWrapper(env)
+    return env
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run smoke tests for Highway Concept envs")
-    parser.add_argument("--render", action="store_true", help="Run the rendering smoke test")
-    parser.add_argument("--state", action="store_true", help="Run the state-only smoke test (no rendering)")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for env reset")
-    parser.add_argument("--render-steps", type=int, default=50, help="Number of steps for rendering smoke test")
-    parser.add_argument("--state-steps", type=int, default=20, help="Number of steps for state smoke test")
+    import argparse
+    parser = argparse.ArgumentParser(description="Multi-episode smoke tests for Roundabout")
+    parser.add_argument("--render", action="store_true", help="Run with human rendering")
+    parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to run")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # If neither flag provided, run both smoke tests
-    if not args.render and not args.state:
-        args.render = True
-        args.state = True
-
+    # Use the 'single' factory for testing
     if args.render:
-        try:
-            env = make_single_highway_env(seed=args.seed) #to visualize, change line 209 to render_mode="human"
-            env.unwrapped.configure({"real_time_rendering": True})
+        env = make_single_highway_env(seed=args.seed)
+    else:
+        env = make_single_highway_state_env(seed=args.seed)
 
-            obs, info = env.reset(seed=args.seed)
-            print('Render smoke test — Obs shape:', getattr(obs, 'shape', None) or (len(obs) if hasattr(obs, '__len__') else type(obs)))
+    for ep in range(args.episodes):
+        obs, info = env.reset(seed=args.seed + ep)
+        done = False
+        step = 0
+        ep_reward = 0
+        
+        print(f"\n=== Starting Episode {ep+1} ===")
+        
+        while not done:
+            action = env.action_space.sample()  # Random actions for smoke test
+            obs, reward, term, trunc, info = env.step(action)
             
-            for i in range(args.render_steps):
-                action = env.action_space.sample()
-                obs, reward, term, trunc, info = env.step(action)
-                
-                # Pull out the concepts for the closest NPC (Indices 0 through 4)
-                npc_aggress = info['concept'][0]
-                npc_rel_x   = info['concept'][1]
-                npc_speed   = info['concept'][3]
-                npc_accel   = info['concept'][4]
-                
-                print(f"Step {i:2d} | NPC_1 [Agg: {npc_aggress:.2f} | Dist: {npc_rel_x:6.1f}m | Speed: {npc_speed:5.1f}m/s | Accel: {npc_accel:5.2f}] | R: {reward:.2f}")
-                
-                if term or trunc:
-                    print(f"--- Episode ended at step {i} ---")
-                    break
-            env.close()
-            print("Render smoke test completed successfully.\n")
-        except Exception as e:
-            print('Render smoke test skipped/failed:', e)
-
-    if args.state:
-        try:
-            state_env = make_single_highway_state_env(seed=args.seed)
-            s_obs, s_info = state_env.reset(seed=args.seed)
+            # Extract concepts for the logs
+            concepts = info.get('concept', np.zeros(20))
+            npc_dist = concepts[0]
+            npc_ttc  = concepts[4]
             
-            for j in range(args.state_steps):
-                action = state_env.action_space.sample()
-                s_obs, s_reward, s_term, s_trunc, s_info = state_env.step(action)
-                
-                s_aggress = s_info['concept'][0]
-                s_accel   = s_info['concept'][4]
-                print(f"State Step {j:2d} | NPC_1 Aggressiveness: {s_aggress:.4f} | Accel: {s_accel:.4f} | Reward: {s_reward:.2f}")
-                
-                if s_term or s_trunc:
-                    print(f"--- Episode ended at step {j} ---")
-                    break
-            state_env.close()
-            print("State smoke test completed successfully.")
-        except Exception as e:
-            print('State smoke test skipped (state env may be unavailable):', e)
+            print(f"Ep {ep+1} | Step {step:2d} | NPC_1 Dist: {npc_dist:5.1f} | TTC: {npc_ttc:4.2f}s | R: {reward:.2f}")
+            
+            ep_reward += reward
+            step += 1
+            done = term or trunc
+            
+            if term:
+                print(f"--- CRASH or GOAL REACHED at step {step} ---")
+                # Highlight the concept state at the moment of failure
+                print(f"Final Concept State: Dist={npc_dist:.2f}, TTC={npc_ttc:.2f}")
+            
+            if trunc:
+                print(f"--- Episode Timed Out ---")
 
+        print(f"Episode {ep+1} Total Reward: {ep_reward:.2f}")
+
+    env.close()
+    print("\nAll smoke test episodes completed.")

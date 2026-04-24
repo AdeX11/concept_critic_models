@@ -56,8 +56,8 @@ class PPO:
         env,                          # vectorised gym env (n_envs)
         policy_kwargs: dict,
         n_steps: int = 2048,
-        n_epochs: int = 10,
-        batch_size: int = 256,
+        n_epochs: int = 5, #10
+        batch_size: int = 128, #256
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_range: float = 0.2,

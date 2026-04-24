@@ -176,10 +176,10 @@ def _run_label(method: str, training_mode: str, temporal_encoding: str) -> str:
 def _run_color(method: str, training_mode: str, temporal_encoding: str) -> str:
     base_color = METHOD_COLORS.get(method, "#999999")
     if method == "concept_actor_critic":
-        if training_mode == "joint":
-            return "#9467bd"   # purple for joint
-        elif temporal_encoding == "gru":
+        if temporal_encoding == "gru":
             return "#2ca02c"
+        elif training_mode == "joint":
+            return "#f3cc4bff"   # yeller for joint
         elif temporal_encoding == "stacked":
             return "#17becf"
         else:  # none
@@ -268,13 +268,26 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
         print("[plot] no concept accuracy data to plot")
         return
 
+    # These are usually regression tasks where the "trend" matters.
     temporal_keywords = (
-        "velocity", "move_direction", "vel_", "direction", 
-        "crush", "broken", "_aggress", "accel"
+        "velocity",      # Panda & Roundabout speeds
+        "vel_",          # Standard velocity prefix
+        "accel",         # Acceleration/Force
+        "ttc",           # Time-to-Collision (Critical for Roundabouts)
+        "angle",         # Angular movement in the circle
+        "direction",     # Heading changes
+        "ee_speed",      # End-effector movement (Panda)
     )
-    
+
+    # Classification keywords: Concepts that are discrete/categorical
+    # These use Cross-Entropy loss instead of MSE.
     classification_keywords = (
-        "contact", "broken", "is_broken", "grasp", "_lane"
+        "contact",       # 0 or 1
+        "any_contact",   # Panda contact sensors
+        "is_grasped",    # Panda gripper status
+        "grasp",         # Generic grasping
+        "_lane",         # Inner (0), Same (1), or Outer (2)
+        "lane_type",     # Specific to highway-env
     )
 
     # Categorize indices
@@ -363,7 +376,7 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
     print(f"[plot] saved → {path}")
 
 
-def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str, env: str) -> None:
+def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
     """
     Final concept accuracy bar chart, one bar per concept, grouped by method.
     Uses the last checkpoint in concept_acc.npz.
@@ -398,7 +411,14 @@ def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str, env: str) -> Non
 
     # --- NEW SORTING LOGIC ---
     # Use the fixed keyword list to identify classification tasks
-    classification_keywords = ("contact", "broken", "is_broken", "grasp", "_lane")
+    classification_keywords = (
+        "contact",       # 0 or 1
+        "any_contact",   # Panda contact sensors
+        "is_grasped",    # Panda gripper status
+        "grasp",         # Generic grasping
+        "_lane",         # Inner (0), Same (1), or Outer (2)
+        "lane_type",     # Specific to highway-env
+    )
     
     class_idxs = []
     reg_idxs = []
@@ -553,8 +573,8 @@ def main() -> None:
     print(f"\n[plot] found {total} completed runs. generating plots → {args.output_dir}\n")
 
     plot_learning_curves(runs, args.output_dir, env=args.env, window=args.smooth_window)
-    plot_concept_accuracy_over_time(runs, args.output_dir, env=args.env)
-    plot_concept_accuracy_per_concept(runs, args.output_dir, env=args.env)
+    plot_concept_accuracy_over_time(runs, args.output_dir)
+    plot_concept_accuracy_per_concept(runs, args.output_dir)
     write_summary_table(runs, args.output_dir)
     write_run_index(runs, args.output_dir)
 

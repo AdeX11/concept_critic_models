@@ -4,15 +4,15 @@
 
 set -e
 
-ENV="pick_place" 
+ENV="highway" 
 STATE=true    
 
 if [ "$ENV" = "highway" ]; then ENV_SHORT="hw"; else ENV_SHORT="pp"; fi
 if [ "$STATE" = "true" ]; then STATE_SHORT="state"; STATE_ARG="--state"; else STATE_SHORT="pixels"; STATE_ARG=""; fi
 
 RUN_NAME="${ENV_SHORT}_${STATE_SHORT}"
-RESULTS_DIR="results/gru_end/$RUN_NAME"
-PLOTS_DIR="plots/gru_end/$RUN_NAME"
+RESULTS_DIR="results/none_end/$RUN_NAME"
+PLOTS_DIR="plots/none_end/$RUN_NAME"
 
 TS=20000
 N_ENVS=6
@@ -65,7 +65,7 @@ python train.py \
     --output_dir $RESULTS_DIR &
 PID3=$!
 
-wait $PID0 $PID1 $PID2 $PID3
+wait $PID0 $PID1 $PID2 
 echo "Training done."
 
 python plot_results.py --env $ENV $STATE_ARG --results_dir $RESULTS_DIR --output_dir $PLOTS_DIR
