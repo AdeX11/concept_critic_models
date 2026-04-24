@@ -25,3 +25,9 @@ env/
 
 # Other
 slurm_commands
+
+# UV
+uv.lock
+main.py
+pyproject.toml
+.python-version
