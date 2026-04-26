@@ -9,9 +9,9 @@
 
 set -e
 
-ENV=highway
+ENV=pick_place
 
-STATE=true
+STATE=false
 
 
 # Build optional STATE_ARG passed to train.py
@@ -23,10 +23,10 @@ fi
 
 # Defaults for full experiments
 TS=20000
-N_ENVS=8
+N_ENVS=6
 SEED=42
-RESULTS_DIR=results/run_all_hw_state
-PLOTS_DIR=plots/run_all_hw_state
+RESULTS_DIR=results/run_pp_visualize
+PLOTS_DIR=plots/run_pp_
 
 
 echo "========================================"
@@ -34,40 +34,40 @@ echo "Starting 4 parallel training runs (shared GPU)"
 echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
-python train.py \
-    --method no_concept \
-    --env $ENV --seed $SEED \
-    $STATE_ARG \
-    --total_timesteps $TS --n_envs $N_ENVS \
-    --device cpu \
-    --output_dir $RESULTS_DIR &
-PID0=$!
+# python train.py \
+#     --method no_concept \
+#     --env $ENV --seed $SEED \
+#     $STATE_ARG \
+#     --total_timesteps $TS --n_envs $N_ENVS \
+#     --device cpu \
+#     --output_dir $RESULTS_DIR &
+# PID0=$!
 
-python train.py \
-    --method vanilla_freeze \
-    --training_mode two_phase \
-    --env $ENV --seed $SEED \
-    $STATE_ARG \
-    --total_timesteps $TS --n_envs $N_ENVS \
-    --device cpu \
-    --output_dir $RESULTS_DIR &
-PID1=$!
+# python train.py \
+#     --method vanilla_freeze \
+#     --training_mode two_phase \
+#     --env $ENV --seed $SEED \
+#     $STATE_ARG \
+#     --total_timesteps $TS --n_envs $N_ENVS \
+#     --device cpu \
+#     --output_dir $RESULTS_DIR &
+# PID1=$!
 
-python train.py \
-    --method concept_actor_critic \
-    --temporal_encoding gru \
-    --training_mode two_phase \
-    --env $ENV --seed $SEED \
-    $STATE_ARG \
-    --total_timesteps $TS --n_envs $N_ENVS \
-    --device cpu \
-    --output_dir $RESULTS_DIR &
-PID2=$!
+# python train.py \
+#     --method concept_actor_critic \
+#     --temporal_encoding gru \
+#     --training_mode two_phase \
+#     --env $ENV --seed $SEED \
+#     $STATE_ARG \
+#     --total_timesteps $TS --n_envs $N_ENVS \
+#     --device cpu \
+#     --output_dir $RESULTS_DIR &
+# PID2=$!
 
 python train.py \
     --method concept_actor_critic \
     --temporal_encoding none \
-    --training_mode two_phase \
+    --training_mode joint \
     --env $ENV --seed $SEED \
     $STATE_ARG \
     --total_timesteps $TS --n_envs $N_ENVS \
@@ -75,7 +75,8 @@ python train.py \
     --output_dir $RESULTS_DIR &
 PID3=$!
 
-wait $PID0 $PID1 $PID2 $PID3
+# wait $PID0 $PID1 $PID2 $PID3
+wait $PID3
 echo "Training done."
 
 echo "========================================"

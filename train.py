@@ -227,6 +227,7 @@ def main() -> None:
         query_labels_per_time = labels_per_query,
     )
 
+
     # ---- Save ----
     rewards_path = os.path.join(out_dir, "rewards.npy")
     np.save(rewards_path, np.array(model.episode_reward_history, dtype=np.float32))
@@ -252,6 +253,27 @@ def main() -> None:
     # ---- Quick evaluation ----
     mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)
     print(f"[train] eval: mean_reward={mean_r:.2f} ± {std_r:.2f}")
+
+    # ---- Visualization ----
+    from envs.record import record_rollout_from_env
+    # ---- Record final rollouts ----
+    num_videos = 5
+
+    for i in range(num_videos):
+        video_path = os.path.join(out_dir, f"rollout_final_{i}.gif")
+
+        try:
+            record_rollout_from_env(
+                model,
+                single_env,
+                video_path=video_path,
+                max_steps=300,
+                deterministic=True,
+                seed=args.seed + 100 + i,
+            )
+
+        except Exception as e:
+            print(f"[train] video {i} failed: {e}")
 
     # Save eval result
     with open(os.path.join(out_dir, "eval.txt"), "w") as f:

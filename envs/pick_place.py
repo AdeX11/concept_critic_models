@@ -40,7 +40,8 @@ class DiscretizePandaActionWrapper(gym.ActionWrapper):
     def __init__(self, env):
         super().__init__(env)
         self.action_space = gym.spaces.Discrete(7)
-        self._gripper_state = 1.0  
+        # panda-gym gripper width: 0.08 = fully open, 0.0 = fully closed
+        self._gripper_state = 0.08  # start OPEN
 
     @property
     def task_types(self): return self.env.task_types
@@ -54,13 +55,14 @@ class DiscretizePandaActionWrapper(gym.ActionWrapper):
 
     def action(self, act: int) -> np.ndarray:
         ctrl = np.zeros(4, dtype=np.float32)
-        if act == 0: ctrl[0] = 1.0      
-        elif act == 1: ctrl[0] = -1.0   
-        elif act == 2: ctrl[1] = 1.0    
-        elif act == 3: ctrl[1] = -1.0   
-        elif act == 4: ctrl[2] = 1.0    
-        elif act == 5: ctrl[2] = -1.0   
-        elif act == 6: self._gripper_state *= -1.0 
+        STEP = 0.1  # large enough to reach the block, small enough for precision
+        if act == 0: ctrl[0] = STEP
+        elif act == 1: ctrl[0] = -STEP
+        elif act == 2: ctrl[1] = STEP
+        elif act == 3: ctrl[1] = -STEP
+        elif act == 4: ctrl[2] = STEP
+        elif act == 5: ctrl[2] = -STEP
+        elif act == 6: self._gripper_state = 0.08 if self._gripper_state < 0.04 else 0.0
         ctrl[3] = self._gripper_state
         return ctrl
 
@@ -201,23 +203,27 @@ class PandaPickPlaceConceptEnv(gym.Wrapper):
         obs, dist = self._assemble_obs_and_concepts(state)
         dist_obj_goal = np.linalg.norm(state["obj_pos"] - state["goal_pos"])
         
+        # Progress-based reward: positive when moving toward object, negative when moving away
         ee_progress = (self._previous_dist - dist) if self._previous_dist is not None else 0.0
         goal_progress = (self._prev_goal_dist - dist_obj_goal) if self._prev_goal_dist is not None else 0.0
-        reward = (ee_progress * 50.0) + (goal_progress * 150.0)
+        reward = ee_progress * 100.0 + goal_progress * 50.0
+        
+        # Proximity bonus: extra reward for being very close to the object
+        reward += max(0.0, 0.3 - dist) * 50.0
 
         if state["contact"] > 0:
             if not getattr(self, "_has_touched", False):
-                reward += 50.0  
+                reward += 100.0  # massive first-contact bonus
                 self._has_touched = True
-            reward += 0.1  
+            reward += 5.0  # sustained contact keeps reward high
 
         if state["is_broken"] > 0:
             if not getattr(self, "_has_broken", False):
-                reward -= 50.0  
+                reward -= 50.0
                 self._has_broken = True
             
         elif dist_obj_goal < 0.05:
-            reward += 10.0  
+            reward += 100.0  # huge success bonus
             
         self._previous_dist = dist
         self._prev_goal_dist = dist_obj_goal
@@ -320,7 +326,7 @@ def make_panda_pickplace_env(n_envs: int = 4, seed: int = 0, max_force: float = 
     
     def _make(rank: int):
         def _init():
-            base_env = gym.make("PandaPickAndPlace-v3", render_mode="rgb_array")
+            base_env = gym.make("PandaPickAndPlace-v3", render_mode="rgb_array", max_episode_steps=500)
             env = PandaPickPlaceConceptEnv(base_env, max_force_threshold=max_force)
             env.reset(seed=seed + rank)
             return DiscretizePandaActionWrapper(env)
@@ -331,7 +337,7 @@ def make_panda_pickplace_env(n_envs: int = 4, seed: int = 0, max_force: float = 
 
 def make_single_panda_env(seed: int = 0, max_force: float = 50.0):
     """Single environment for debugging / future visualization."""
-    base_env = gym.make("PandaPickAndPlace-v3", render_mode="rgb_array")
+    base_env = gym.make("PandaPickAndPlace-v3", render_mode="rgb_array", max_episode_steps=500)
     env = PandaPickPlaceConceptEnv(base_env, max_force_threshold=max_force)
     env.reset(seed=seed)
     return DiscretizePandaActionWrapper(env)
@@ -340,7 +346,7 @@ def make_panda_pickplace_state_env(n_envs: int = 4, seed: int = 0, max_force: fl
     from gymnasium.vector import AsyncVectorEnv
     def _make(rank: int):
         def _init():
-            base = gym.make("PandaPickAndPlace-v3")
+            base = gym.make("PandaPickAndPlace-v3", max_episode_steps=500)
             env = PandaPickPlaceConceptEnv(base, max_force_threshold=max_force)
             env.reset(seed=seed + rank)
             state_env = PickPlaceStateEnv(env)
@@ -349,11 +355,12 @@ def make_panda_pickplace_state_env(n_envs: int = 4, seed: int = 0, max_force: fl
     return AsyncVectorEnv([_make(i) for i in range(n_envs)])
 
 def make_single_panda_pickplace_state_env(seed: int = 0, max_force: float = 50.0) -> gym.Env:
-    base = gym.make("PandaPickAndPlace-v3")
+    base = gym.make("PandaPickAndPlace-v3", max_episode_steps=500)
     env = PandaPickPlaceConceptEnv(base, max_force_threshold=max_force)
     env.reset(seed=seed)
     state_env = PickPlaceStateEnv(env)
     return DiscretizePandaActionWrapper(state_env)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run smoke tests for pick_place envs")
@@ -361,7 +368,7 @@ if __name__ == "__main__":
     parser.add_argument("--state", action="store_true", help="Run the state-only smoke test (no rendering)")
     parser.add_argument("--max-force", type=float, default=30.0, help="Max force threshold used to compute crush_risk")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for env reset")
-    parser.add_argument("--render-steps", type=int, default=2000, help="Number of steps for rendering smoke test")
+    parser.add_argument("--render-steps", type=int, default=20, help="Number of steps for rendering smoke test")
     parser.add_argument("--state-steps", type=int, default=20, help="Number of steps for state smoke test")
     args = parser.parse_args()
 
