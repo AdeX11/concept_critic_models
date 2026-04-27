@@ -46,6 +46,20 @@ METHOD_COLORS = {
     "concept_actor_critic": "#2ca02c",
 }
 
+# Env-specific reward reference lines (theoretical max / solve threshold) and
+# concept metric type — classification → accuracy (↑), regression → MSE (↓).
+ENV_REWARD_REF = {
+    "tmaze":            {"max": 0.89, "label": "theoretical max (0.89)"},
+    "cartpole":         {"max": 500.0, "label": "max episode return (500)"},
+    "lunar_lander":     {"max": 200.0, "label": "solved (200)"},
+    "lunar_lander_state": {"max": 200.0, "label": "solved (200)"},
+    "lunar_lander_pos_only": {"max": 200.0, "label": "solved (200)"},
+    "mountain_car":     {"max": -110.0, "label": "solved (-110)"},
+}
+
+# All concepts in these envs are classification → accuracy is the only metric.
+ENV_ALL_CLASSIFICATION = {"tmaze", "dynamic_obstacles"}
+
 # Directory name format: <method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>
 DIR_PATTERN = re.compile(
     r"^(?P<method>[^_]+(?:_[^_]+)*)_"
@@ -156,12 +170,14 @@ def smooth(values: np.ndarray, window: int = 20) -> np.ndarray:
 def _run_label(method: str, training_mode: str, temporal_encoding: str) -> str:
     base = METHOD_LABELS.get(method, method)
     extras = []
-    if method == "concept_actor_critic":
+    if temporal_encoding != "none":
         extras.append(temporal_encoding)
     if training_mode == "end_to_end":
         extras.append("e2e")
     elif training_mode == "joint":
         extras.append("joint")
+    elif training_mode == "two_phase":
+        extras.append("two_phase")
     if extras:
         return f"{base} ({', '.join(extras)})"
     return base
@@ -187,7 +203,7 @@ def _run_color(method: str, training_mode: str, temporal_encoding: str) -> str:
 # Plots
 # ---------------------------------------------------------------------------
 
-def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
+def plot_learning_curves(runs: Dict, out_dir: str, env: str, window: int = 30) -> None:
     fig, ax = plt.subplots(figsize=(11, 6))
 
     plotted = False
@@ -224,9 +240,14 @@ def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
         plt.close(fig)
         return
 
+    ref = ENV_REWARD_REF.get(env)
+    if ref is not None:
+        ax.axhline(ref["max"], color="black", linestyle="--", linewidth=1.0,
+                   alpha=0.6, label=ref["label"])
+
     ax.set_xlabel("Episode", fontsize=12)
-    ax.set_ylabel("Reward", fontsize=13)
-    ax.set_title("Learning Curves", fontsize=14)
+    ax.set_ylabel("Episode reward  (↑ higher is better)", fontsize=13)
+    ax.set_title(f"Learning Curves — {env}", fontsize=14)
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -237,7 +258,7 @@ def plot_learning_curves(runs: Dict, out_dir: str, window: int = 30) -> None:
     print(f"[plot] saved → {path}")
 
 
-def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
+def plot_concept_accuracy_over_time(runs: Dict, out_dir: str, env: str) -> None:
     """
     Plot concept prediction quality vs timestep, split into two subplots:
       - Static concepts  (position, angle, leg contact)
@@ -268,7 +289,7 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
         print("[plot] no concept accuracy data to plot")
         return
 
-    temporal_keywords = ("velocity", "move_direction", "vel_", "direction")
+    temporal_keywords = ("velocity", "move_direction", "vel_", "direction", "cue")
     temporal_idx = [
         i for i, n in enumerate(concept_names_ref)
         if any(kw in n.lower() for kw in temporal_keywords)
@@ -323,19 +344,40 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
     static_names   = [concept_names_ref[i] for i in static_idx]
     temporal_names = [concept_names_ref[i] for i in temporal_idx]
 
+    all_cls = env in ENV_ALL_CLASSIFICATION
+    static_ylabel = (
+        "Classification accuracy  (↑ higher is better, 1.0 = perfect)"
+        if all_cls else
+        "MSE for regression (↓ lower)  /  accuracy for classification (↑ higher)"
+    )
+    temporal_ylabel = (
+        "Classification accuracy  (↑ higher is better, 1.0 = perfect)"
+        if all_cls else
+        "MSE  (↓ lower is better, 0.0 = perfect)"
+    )
+
     ax_static.set_title(f"Static Concepts\n({', '.join(static_names)})", fontsize=11)
     ax_static.set_xlabel("Timestep", fontsize=11)
-    ax_static.set_ylabel("MSE (↓ better)  /  classification acc (↑ better)", fontsize=10)
+    ax_static.set_ylabel(static_ylabel, fontsize=10)
     ax_static.legend(fontsize=9)
     ax_static.grid(True, alpha=0.3)
+    if all_cls:
+        ax_static.set_ylim(-0.02, 1.05)
+        ax_static.axhline(1.0, color="black", linestyle=":", linewidth=0.8, alpha=0.5)
 
     ax_temporal.set_title(f"Temporal Concepts\n({', '.join(temporal_names)})", fontsize=11)
     ax_temporal.set_xlabel("Timestep", fontsize=11)
-    ax_temporal.set_ylabel("MSE (↓ better)", fontsize=10)
+    ax_temporal.set_ylabel(temporal_ylabel, fontsize=10)
     ax_temporal.legend(fontsize=9)
     ax_temporal.grid(True, alpha=0.3)
+    if all_cls:
+        ax_temporal.set_ylim(-0.02, 1.05)
+        ax_temporal.axhline(1.0, color="black", linestyle=":", linewidth=0.8, alpha=0.5)
 
-    fig.suptitle("Concept Accuracy Over Training", fontsize=13, y=1.01)
+    suptitle = f"Concept Prediction Quality Over Training — {env}"
+    if all_cls:
+        suptitle += "  (metric: accuracy, ↑ better)"
+    fig.suptitle(suptitle, fontsize=13, y=1.01)
     plt.tight_layout()
 
     path = os.path.join(out_dir, "concept_accuracy_over_time.png")
@@ -344,7 +386,7 @@ def plot_concept_accuracy_over_time(runs: Dict, out_dir: str) -> None:
     print(f"[plot] saved → {path}")
 
 
-def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
+def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str, env: str) -> None:
     """
     Final concept accuracy bar chart, one bar per concept, grouped by method.
     Uses the last checkpoint in concept_acc.npz.
@@ -387,13 +429,26 @@ def plot_concept_accuracy_per_concept(runs: Dict, out_dir: str) -> None:
         offset = (i - n_methods / 2 + 0.5) * width
         ax.bar(x + offset, vals, width, label=label, alpha=0.8)
 
+    all_cls = env in ENV_ALL_CLASSIFICATION
+    ylabel = (
+        "Classification accuracy  (↑ higher is better, 1.0 = perfect)"
+        if all_cls else
+        "MSE for regression (↓ lower)  /  accuracy for classification (↑ higher)"
+    )
+    title = f"Final Per-Concept Prediction Quality — {env}"
+    if all_cls:
+        title += "  (metric: accuracy, ↑ better)"
+
     ax.set_xlabel("Concept", fontsize=12)
-    ax.set_ylabel("MSE (↓ better)  /  classification acc (↑ better)", fontsize=12)
-    ax.set_title("Final Per-Concept Concept Prediction", fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=14)
     ax.set_xticks(x)
     ax.set_xticklabels(concept_names, rotation=30, ha="right", fontsize=9)
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3, axis="y")
+    if all_cls:
+        ax.set_ylim(0, 1.05)
+        ax.axhline(1.0, color="black", linestyle=":", linewidth=0.8, alpha=0.5)
     plt.tight_layout()
 
     path = os.path.join(out_dir, "concept_accuracy_per_concept.png")
@@ -463,7 +518,8 @@ def main() -> None:
     )
     parser.add_argument("--env", required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only", "mountain_car"])
+                                 "lunar_lander_state", "lunar_lander_pos_only",
+                                 "mountain_car", "hidden_velocity", "tmaze"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
     parser.add_argument("--results_dir",  type=str, default="/glade/derecho/scratch/adadelek/results",
                         help="Directory containing completed run subdirectories")
@@ -488,9 +544,9 @@ def main() -> None:
     )
     print(f"\n[plot] found {total} completed runs. generating plots → {args.output_dir}\n")
 
-    plot_learning_curves(runs, args.output_dir, window=args.smooth_window)
-    plot_concept_accuracy_over_time(runs, args.output_dir)
-    plot_concept_accuracy_per_concept(runs, args.output_dir)
+    plot_learning_curves(runs, args.output_dir, env=args.env, window=args.smooth_window)
+    plot_concept_accuracy_over_time(runs, args.output_dir, env=args.env)
+    plot_concept_accuracy_per_concept(runs, args.output_dir, env=args.env)
     write_summary_table(runs, args.output_dir)
     write_run_index(runs, args.output_dir)
 

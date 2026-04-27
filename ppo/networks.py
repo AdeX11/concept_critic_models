@@ -35,20 +35,38 @@ class FlexibleMultiTaskNetwork(nn.Module):
       - classification: nn.Linear(feature_dim, K)  → argmax → integer class
       - regression:     nn.Linear(feature_dim, 1)  → scalar
 
-    forward() returns [B, n_concepts] (float tensor of argmax / scalar predictions).
-    get_logits() returns list of raw output tensors (for loss computation).
+    temporal_encoding='gru' adds a GRUCell before the heads (same hidden_dim
+    as ConceptActorCritic) so vanilla_freeze can maintain temporal state.
+    This makes the comparison with concept_actor_critic fair: both have the
+    same GRU architecture; the difference is only the training signal.
+
+    forward(x, h_prev) returns ([B, n_concepts], h_t or None).
+    get_logits(x, h_prev) returns (list of raw tensors, h_t or None).
     """
+
+    HIDDEN_DIM = 256   # match ConceptActorCritic for fair comparison
 
     def __init__(
         self,
         feature_dim: int,
         task_types: List[str],
         num_classes: List[int],
+        temporal_encoding: str = "none",
     ):
         super().__init__()
         self.task_types = task_types
         self.num_classes = num_classes
         self.n_concepts = len(task_types)
+        self.temporal_encoding = temporal_encoding
+
+        if temporal_encoding == "gru":
+            self.hidden_dim = self.HIDDEN_DIM
+            self.gru = nn.GRUCell(feature_dim, self.HIDDEN_DIM)
+            head_input_dim = self.HIDDEN_DIM
+        else:
+            self.hidden_dim = feature_dim
+            self.gru = None
+            head_input_dim = feature_dim
 
         self.heads = nn.ModuleList()
         for task_type, n_cls in zip(task_types, num_classes):
@@ -56,30 +74,47 @@ class FlexibleMultiTaskNetwork(nn.Module):
                 assert n_cls is not None and n_cls > 1, (
                     "num_classes must be > 1 for classification"
                 )
-                self.heads.append(nn.Linear(feature_dim, n_cls))
+                self.heads.append(nn.Linear(head_input_dim, n_cls))
             elif task_type == "regression":
-                self.heads.append(nn.Linear(feature_dim, 1))
+                self.heads.append(nn.Linear(head_input_dim, 1))
             else:
                 raise ValueError(f"Unknown task_type '{task_type}'")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _get_head_input(
+        self, x: torch.Tensor, h_prev: Optional[torch.Tensor]
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.gru is None:
+            return x, None
+        B = x.size(0)
+        if h_prev is None:
+            h_prev = torch.zeros(B, self.hidden_dim, device=x.device)
+        h_t = self.gru(x, h_prev)
+        return h_t, h_t
+
+    def forward(
+        self, x: torch.Tensor, h_prev: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         x: [B, feature_dim]
-        returns: [B, n_concepts]  (argmax for classification, scalar for regression)
+        returns: ([B, n_concepts], h_t or None)
         """
+        head_input, h_t = self._get_head_input(x, h_prev)
         outputs = []
         for head, task_type in zip(self.heads, self.task_types):
-            out = head(x)
+            out = head(head_input)
             if task_type == "classification":
                 out = out.argmax(dim=1).float()
             else:
                 out = out.squeeze(dim=1)
             outputs.append(out)
-        return torch.stack(outputs, dim=1)  # [B, n_concepts]
+        return torch.stack(outputs, dim=1), h_t  # [B, n_concepts], h_t
 
-    def get_logits(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """Returns raw logits / scalars — one tensor per concept."""
-        return [head(x) for head in self.heads]
+    def get_logits(
+        self, x: torch.Tensor, h_prev: Optional[torch.Tensor] = None
+    ) -> Tuple[List[torch.Tensor], Optional[torch.Tensor]]:
+        """Returns (raw logits / scalars per concept, h_t or None)."""
+        head_input, h_t = self._get_head_input(x, h_prev)
+        return [head(head_input) for head in self.heads], h_t
 
     def compute_loss(
         self, logits: List[torch.Tensor], ground_truth: torch.Tensor
