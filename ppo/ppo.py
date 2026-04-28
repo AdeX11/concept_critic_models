@@ -1148,12 +1148,9 @@ class PPO:
         while done_count < n_episodes:
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.concept_net == "concept_ac":
-                    actions, h_new = self.policy.predict(obs_t, h_t, deterministic)
-                    if h_new is not None:
-                        h_t = h_new
-                else:
-                    actions, _ = self.policy.predict(obs_t, deterministic=deterministic)
+                actions, h_new = self.policy.predict(obs_t, h_t, deterministic)
+                if h_new is not None:
+                    h_t = h_new
 
             obs, r, terminated, truncated, _ = self.env.step(actions.cpu().numpy())
             dones = np.logical_or(terminated, truncated)

@@ -25,8 +25,8 @@ Actions:
   2: choose RIGHT  (correct when cue == 1)
 
 Rewards:
-  +1.0  correct choice at junction
-  -1.0  wrong choice at junction
+  +1.0  correct choice at junction (LEFT when cue=0, RIGHT when cue=1)
+  -1.0  wrong choice at junction, or forward at junction (must commit)
   -0.05 premature choice (choose action before junction)
   -0.01 per step (time pressure)
   Episode ends on choice or max_steps.
@@ -112,8 +112,8 @@ class TMazeEnv(gym.Env):
                 reward += 1.0 if self._cue == 0 else -1.0
             elif action == 2:   # choose RIGHT — correct when cue == 1
                 reward += 1.0 if self._cue == 1 else -1.0
-            else:               # forward at junction: penalise and end
-                reward += 1.0 if self._cue == 0 else -1.0
+            else:               # forward at junction — always wrong, must commit
+                reward += -1.0
             terminated = True
         else:
             if action == 0:
