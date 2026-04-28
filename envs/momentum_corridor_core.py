@@ -15,15 +15,18 @@ GRID_WIDTH = 9
 GRID_HEIGHT = 7
 OBS_SIZE = 84
 MAX_STEPS = 18
+HARD_MAX_STEPS = 24
 
 START = (4, 5)
 GOAL = (4, 1)
 CORRIDOR_X = 4
 CORRIDOR_CELLS = {(CORRIDOR_X, y) for y in range(1, 6)}
-HAZARD_AGENT_Y = {3, 4}
+DEFAULT_HAZARD_AGENT_Y = (3, 4)
+HARD_HAZARD_AGENT_Y = (2, 3, 4)
+HAZARD_AGENT_Y = set(DEFAULT_HAZARD_AGENT_Y)
 MOVER_RAIL_X = tuple(range(1, 8))
-MOVER_RAIL_Y = 3
 VELOCITY_VALUES = (-2, -1, 1, 2)
+HARD_VELOCITY_VALUES = (-1, 1)
 
 STEP_REWARD = -0.02
 GOAL_REWARD = 1.0
@@ -88,8 +91,22 @@ class MomentumCorridorSimulator:
 
     actions = Actions
 
-    def __init__(self, seed: int = 0):
+    def __init__(
+        self,
+        seed: int = 0,
+        hazard_agent_y: Tuple[int, ...] = DEFAULT_HAZARD_AGENT_Y,
+        max_steps: int = MAX_STEPS,
+        velocity_values: Tuple[int, ...] = VELOCITY_VALUES,
+    ):
         self.rng = np.random.default_rng(seed)
+        self.hazard_agent_y = tuple(sorted(hazard_agent_y))
+        self._validate_hazard_agent_y(self.hazard_agent_y)
+        self.max_steps = int(max_steps)
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be positive")
+        self.velocity_values = tuple(velocity_values)
+        if not self.velocity_values or any(v not in VELOCITY_VALUES for v in self.velocity_values):
+            raise ValueError(f"velocity_values must be a non-empty subset of {VELOCITY_VALUES}")
         self.state = MomentumCorridorState()
 
     def reset(
@@ -104,7 +121,7 @@ class MomentumCorridorSimulator:
         self._validate_reset_controls(forced_mover_x, forced_mover_velocity)
         mover_x = forced_mover_x if forced_mover_x is not None else int(self.rng.choice(MOVER_RAIL_X))
         mover_velocity = (
-            forced_mover_velocity if forced_mover_velocity is not None else int(self.rng.choice(VELOCITY_VALUES))
+            forced_mover_velocity if forced_mover_velocity is not None else int(self.rng.choice(self.velocity_values))
         )
         self.state = MomentumCorridorState(
             agent_pos=START,
@@ -152,7 +169,7 @@ class MomentumCorridorSimulator:
             terminated = True
             reward = COLLISION_REWARD
             info["failure_reason"] = "collision"
-        elif next_state.step_count >= MAX_STEPS:
+        elif next_state.step_count >= self.max_steps:
             truncated = True
             info["failure_reason"] = "timeout"
         else:
@@ -167,7 +184,7 @@ class MomentumCorridorSimulator:
             [
                 state.agent_pos[1],
                 int(state.agent_pos == START),
-                int(state.agent_pos[1] in HAZARD_AGENT_Y),
+                int(state.agent_pos[1] in self.hazard_agent_y),
                 state.mover_x - MOVER_RAIL_X[0],
                 VELOCITY_TO_CLASS[state.mover_velocity],
             ],
@@ -203,7 +220,7 @@ class MomentumCorridorSimulator:
                 x1 = x0 + cell_w
 
                 color = COLOR_WALL
-                if x in MOVER_RAIL_X and y == MOVER_RAIL_Y:
+                if x in MOVER_RAIL_X and y in self.hazard_agent_y:
                     color = COLOR_LANE
                 if (x, y) in CORRIDOR_CELLS:
                     color = COLOR_CORRIDOR
@@ -216,9 +233,10 @@ class MomentumCorridorSimulator:
                 canvas[y1 - 1, x0:x1] = COLOR_BG
 
         mx = state.mover_x
-        y0 = y_offset + MOVER_RAIL_Y * cell_h
         x0 = x_offset + mx * cell_w
-        canvas[y0 + 2:y0 + cell_h - 2, x0 + 1:x0 + cell_w - 1] = COLOR_MOVER
+        for mover_y in self.hazard_agent_y:
+            y0 = y_offset + mover_y * cell_h
+            canvas[y0 + 2:y0 + cell_h - 2, x0 + 1:x0 + cell_w - 1] = COLOR_MOVER
 
         ax, ay = state.agent_pos
         y0 = y_offset + ay * cell_h
@@ -228,19 +246,33 @@ class MomentumCorridorSimulator:
 
     def safe_to_start_crossing(self, state: Optional[MomentumCorridorState] = None) -> bool:
         state = self.state if state is None else state
-        x1, v1 = self._advance_mover(state.mover_x, state.mover_velocity)
-        x2, _ = self._advance_mover(x1, v1)
-        return x1 != CORRIDOR_X and x2 != CORRIDOR_X
+        mover_x = state.mover_x
+        mover_velocity = state.mover_velocity
+        for _ in self.hazard_agent_y:
+            mover_x, mover_velocity = self._advance_mover(mover_x, mover_velocity)
+            if mover_x == CORRIDOR_X:
+                return False
+        return True
 
-    @staticmethod
     def _validate_reset_controls(
+        self,
         forced_mover_x: Optional[int],
         forced_mover_velocity: Optional[int],
     ) -> None:
         if forced_mover_x is not None and forced_mover_x not in MOVER_RAIL_X:
             raise ValueError(f"forced_mover_x must be one of {MOVER_RAIL_X}")
-        if forced_mover_velocity is not None and forced_mover_velocity not in VELOCITY_VALUES:
-            raise ValueError(f"forced_mover_velocity must be one of {VELOCITY_VALUES}")
+        if forced_mover_velocity is not None and forced_mover_velocity not in self.velocity_values:
+            raise ValueError(f"forced_mover_velocity must be one of {self.velocity_values}")
+
+    @staticmethod
+    def _validate_hazard_agent_y(hazard_agent_y: Tuple[int, ...]) -> None:
+        if not hazard_agent_y:
+            raise ValueError("hazard_agent_y must be non-empty")
+        if tuple(sorted(hazard_agent_y)) != hazard_agent_y:
+            raise ValueError("hazard_agent_y must be sorted ascending")
+        for y in hazard_agent_y:
+            if y not in range(1, 6):
+                raise ValueError("hazard_agent_y must lie inside corridor rows 1..5")
 
     @staticmethod
     def _advance_mover(mover_x: int, mover_velocity: int) -> Tuple[int, int]:
@@ -255,6 +287,5 @@ class MomentumCorridorSimulator:
                 next_velocity = -next_velocity
         return next_x, next_velocity
 
-    @staticmethod
-    def _is_collision(state: MomentumCorridorState) -> bool:
-        return state.agent_pos[1] in HAZARD_AGENT_Y and state.mover_x == CORRIDOR_X
+    def _is_collision(self, state: MomentumCorridorState) -> bool:
+        return state.agent_pos[1] in self.hazard_agent_y and state.mover_x == CORRIDOR_X

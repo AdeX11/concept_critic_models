@@ -35,16 +35,18 @@ from ppo.ppo                import PPO
 from runtime_utils import get_obs_shape, write_json
 
 
-METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic"]
+METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"]
 METHOD_LABELS = {
     "no_concept":           "No Concept (PPO)",
     "vanilla_freeze":       "Vanilla Freeze (CBM)",
     "concept_actor_critic": "Concept Actor-Critic",
+    "gvf":                  "GVF CBM",
 }
 METHOD_COLORS = {
     "no_concept":           "#1f77b4",
     "vanilla_freeze":       "#ff7f0e",
     "concept_actor_critic": "#2ca02c",
+    "gvf":                  "#9467bd",
 }
 
 

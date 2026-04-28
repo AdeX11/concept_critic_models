@@ -22,6 +22,9 @@ from .phase_crossing import (
 )
 from .momentum_corridor import (
     make_momentum_corridor_env,
+    make_momentum_corridor_hard_env,
+    make_momentum_corridor_hard_state_env,
+    make_momentum_corridor_hard_visible_env,
     make_momentum_corridor_state_env,
     make_momentum_corridor_visible_env,
     MomentumCorridorPixelEnv,
@@ -35,4 +38,10 @@ from .synchrony_window import (
     SynchronyWindowPixelEnv,
     SynchronyWindowStateEnv,
     SynchronyWindowVisibleEnv,
+)
+from .tmaze import TMazeEnv, make_single_tmaze_env, make_tmaze_env
+from .hidden_velocity import (
+    HiddenVelocityEnv,
+    make_hidden_velocity_env,
+    make_single_hidden_velocity_env,
 )

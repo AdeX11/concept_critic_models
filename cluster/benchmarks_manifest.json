@@ -151,6 +151,35 @@
       "oracle_reference": null
     },
     {
+      "benchmark_id": "hidden_velocity",
+      "env_name": "hidden_velocity",
+      "family": "hidden_velocity",
+      "variant": "default",
+      "role": "pilot",
+      "capability_tags": [
+        "latent_dynamics",
+        "hidden_velocity",
+        "diagnostic"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 1000000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "temporal_concept_diagnostic"
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": null,
+      "oracle_reference": null
+    },
+    {
       "benchmark_id": "lunar_lander",
       "env_name": "lunar_lander",
       "family": "lunar_lander",
@@ -266,6 +295,92 @@
       "hidden_benchmark_id": null,
       "reactive_reference": 0.36484,
       "oracle_reference": 0.93082
+    },
+    {
+      "benchmark_id": "momentum_corridor_hard",
+      "env_name": "momentum_corridor_hard",
+      "family": "momentum_corridor",
+      "variant": "hard_hidden",
+      "role": "hidden",
+      "capability_tags": [
+        "latent_dynamics",
+        "pixel"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 900000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate",
+        "concept_accuracy"
+      ],
+      "acceptance_gate": {
+        "type": "interpretable_or_solved"
+      },
+      "paper_central": true,
+      "requires_control_twin": true,
+      "visible_control_id": "momentum_corridor_hard_visible",
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.04296,
+      "oracle_reference": 0.91344
+    },
+    {
+      "benchmark_id": "momentum_corridor_hard_state",
+      "env_name": "momentum_corridor_hard_state",
+      "family": "momentum_corridor",
+      "variant": "hard_state",
+      "role": "state",
+      "capability_tags": [
+        "latent_dynamics",
+        "diagnostic"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 300000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "state_gate"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": 0.04296,
+      "oracle_reference": 0.91344
+    },
+    {
+      "benchmark_id": "momentum_corridor_hard_visible",
+      "env_name": "momentum_corridor_hard_visible",
+      "family": "momentum_corridor",
+      "variant": "hard_visible",
+      "role": "visible",
+      "capability_tags": [
+        "latent_dynamics",
+        "reactive_control",
+        "pixel"
+      ],
+      "difficulty_level": "hard",
+      "canonical_total_timesteps": 700000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "success_rate"
+      ],
+      "acceptance_gate": {
+        "type": "reactive_control"
+      },
+      "paper_central": true,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": "momentum_corridor_hard",
+      "reactive_reference": 0.04296,
+      "oracle_reference": 0.91344
     },
     {
       "benchmark_id": "momentum_corridor_state",
@@ -609,6 +724,39 @@
       "hidden_benchmark_id": "synchrony_window",
       "reactive_reference": 0.3702,
       "oracle_reference": 0.9334
+    },
+    {
+      "benchmark_id": "tmaze",
+      "env_name": "tmaze",
+      "family": "tmaze",
+      "variant": "delayed_cue",
+      "role": "pilot",
+      "capability_tags": [
+        "event_memory",
+        "delayed_cue",
+        "steerability",
+        "diagnostic"
+      ],
+      "difficulty_level": "medium",
+      "canonical_total_timesteps": 1000000,
+      "canonical_num_labels": 500,
+      "canonical_query_num_times": 1,
+      "primary_metrics": [
+        "mean_return",
+        "concept_accuracy",
+        "steerability"
+      ],
+      "acceptance_gate": {
+        "type": "memory_gate",
+        "min_mean_return": 0.7,
+        "requires_steerability_eval": true
+      },
+      "paper_central": false,
+      "requires_control_twin": false,
+      "visible_control_id": null,
+      "hidden_benchmark_id": null,
+      "reactive_reference": -0.11,
+      "oracle_reference": 0.89
     }
   ]
 }

@@ -14,6 +14,10 @@ from .base import ConceptMetadataMixin
 from .momentum_corridor_core import (
     ACTION_DELTAS,
     CONCEPT_NAMES,
+    DEFAULT_HAZARD_AGENT_Y,
+    HARD_MAX_STEPS,
+    HARD_HAZARD_AGENT_Y,
+    HARD_VELOCITY_VALUES,
     NUM_CLASSES,
     OBS_SIZE,
     TASK_TYPES,
@@ -26,9 +30,20 @@ class _MomentumCorridorEnvBase(ConceptMetadataMixin, gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 8}
     actions = MomentumCorridorSimulator.actions
 
-    def __init__(self, seed: int = 0):
+    def __init__(
+        self,
+        seed: int = 0,
+        hazard_agent_y=DEFAULT_HAZARD_AGENT_Y,
+        max_steps=None,
+        velocity_values=None,
+    ):
         super().__init__()
-        self.sim = MomentumCorridorSimulator(seed=seed)
+        kwargs = {"seed": seed, "hazard_agent_y": tuple(hazard_agent_y)}
+        if max_steps is not None:
+            kwargs["max_steps"] = max_steps
+        if velocity_values is not None:
+            kwargs["velocity_values"] = tuple(velocity_values)
+        self.sim = MomentumCorridorSimulator(**kwargs)
         self.task_types = list(TASK_TYPES)
         self.num_classes = list(NUM_CLASSES)
         self.concept_names = list(CONCEPT_NAMES)
@@ -56,8 +71,19 @@ class _MomentumCorridorEnvBase(ConceptMetadataMixin, gym.Env):
 
 
 class MomentumCorridorStateEnv(_MomentumCorridorEnvBase):
-    def __init__(self, seed: int = 0):
-        super().__init__(seed=seed)
+    def __init__(
+        self,
+        seed: int = 0,
+        hazard_agent_y=DEFAULT_HAZARD_AGENT_Y,
+        max_steps=None,
+        velocity_values=None,
+    ):
+        super().__init__(
+            seed=seed,
+            hazard_agent_y=hazard_agent_y,
+            max_steps=max_steps,
+            velocity_values=velocity_values,
+        )
         self.observation_space = gym.spaces.Box(
             low=np.array([0.0, 0.0, 0.0], dtype=np.float32),
             high=np.array([1.0, 1.0, 1.0], dtype=np.float32),
@@ -90,8 +116,20 @@ class MomentumCorridorStateEnv(_MomentumCorridorEnvBase):
 
 
 class MomentumCorridorPixelEnv(_MomentumCorridorEnvBase):
-    def __init__(self, seed: int = 0, n_stack: int = 1):
-        super().__init__(seed=seed)
+    def __init__(
+        self,
+        seed: int = 0,
+        n_stack: int = 1,
+        hazard_agent_y=DEFAULT_HAZARD_AGENT_Y,
+        max_steps=None,
+        velocity_values=None,
+    ):
+        super().__init__(
+            seed=seed,
+            hazard_agent_y=hazard_agent_y,
+            max_steps=max_steps,
+            velocity_values=velocity_values,
+        )
         self.n_stack = int(n_stack)
         if self.n_stack < 1:
             raise ValueError("n_stack must be >= 1")
@@ -264,5 +302,128 @@ def make_single_momentum_corridor_state_env(
     if n_stack not in (None, 1):
         raise ValueError("momentum_corridor_state only supports n_stack=None or 1")
     env = MomentumCorridorStateEnv(seed=seed)
+    env.reset(seed=seed)
+    return env
+
+
+def make_momentum_corridor_hard_env(
+    n_envs: int = 4,
+    seed: int = 0,
+    n_stack: int = 1,
+) -> gym.Env:
+    from gymnasium.vector import AsyncVectorEnv
+
+    def _make(rank: int):
+        def _init():
+            env = MomentumCorridorPixelEnv(
+                seed=seed + rank,
+                n_stack=n_stack,
+                hazard_agent_y=HARD_HAZARD_AGENT_Y,
+                max_steps=HARD_MAX_STEPS,
+                velocity_values=HARD_VELOCITY_VALUES,
+            )
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_momentum_corridor_hard_env(
+    seed: int = 0,
+    n_stack: int = 1,
+) -> MomentumCorridorPixelEnv:
+    env = MomentumCorridorPixelEnv(
+        seed=seed,
+        n_stack=n_stack,
+        hazard_agent_y=HARD_HAZARD_AGENT_Y,
+        max_steps=HARD_MAX_STEPS,
+        velocity_values=HARD_VELOCITY_VALUES,
+    )
+    env.reset(seed=seed)
+    return env
+
+
+def make_momentum_corridor_hard_visible_env(
+    n_envs: int = 4,
+    seed: int = 0,
+    n_stack: int = 1,
+) -> gym.Env:
+    from gymnasium.vector import AsyncVectorEnv
+
+    def _make(rank: int):
+        def _init():
+            env = MomentumCorridorVisibleEnv(
+                seed=seed + rank,
+                n_stack=n_stack,
+                hazard_agent_y=HARD_HAZARD_AGENT_Y,
+                max_steps=HARD_MAX_STEPS,
+                velocity_values=HARD_VELOCITY_VALUES,
+            )
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_momentum_corridor_hard_visible_env(
+    seed: int = 0,
+    n_stack: int = 1,
+) -> MomentumCorridorVisibleEnv:
+    env = MomentumCorridorVisibleEnv(
+        seed=seed,
+        n_stack=n_stack,
+        hazard_agent_y=HARD_HAZARD_AGENT_Y,
+        max_steps=HARD_MAX_STEPS,
+        velocity_values=HARD_VELOCITY_VALUES,
+    )
+    env.reset(seed=seed)
+    return env
+
+
+def make_momentum_corridor_hard_state_env(
+    n_envs: int = 4,
+    seed: int = 0,
+    n_stack: Optional[int] = None,
+    **kwargs,
+) -> gym.Env:
+    if kwargs:
+        raise ValueError(f"Unexpected kwargs for momentum_corridor_hard_state: {sorted(kwargs)}")
+    if n_stack not in (None, 1):
+        raise ValueError("momentum_corridor_hard_state only supports n_stack=None or 1")
+
+    from gymnasium.vector import AsyncVectorEnv
+
+    def _make(rank: int):
+        def _init():
+            env = MomentumCorridorStateEnv(
+                seed=seed + rank,
+                hazard_agent_y=HARD_HAZARD_AGENT_Y,
+                max_steps=HARD_MAX_STEPS,
+                velocity_values=HARD_VELOCITY_VALUES,
+            )
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+
+    return AsyncVectorEnv([_make(i) for i in range(n_envs)])
+
+
+def make_single_momentum_corridor_hard_state_env(
+    seed: int = 0,
+    n_stack: Optional[int] = None,
+    **kwargs,
+) -> MomentumCorridorStateEnv:
+    if kwargs:
+        raise ValueError(f"Unexpected kwargs for momentum_corridor_hard_state: {sorted(kwargs)}")
+    if n_stack not in (None, 1):
+        raise ValueError("momentum_corridor_hard_state only supports n_stack=None or 1")
+    env = MomentumCorridorStateEnv(
+        seed=seed,
+        hazard_agent_y=HARD_HAZARD_AGENT_Y,
+        max_steps=HARD_MAX_STEPS,
+        velocity_values=HARD_VELOCITY_VALUES,
+    )
     env.reset(seed=seed)
     return env

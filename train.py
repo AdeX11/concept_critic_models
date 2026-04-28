@@ -64,7 +64,7 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, temporal_e
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RL agent with optional concept bottleneck.")
     parser.add_argument("--method", required=True,
-                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
+                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"])
     parser.add_argument("--benchmark", default=None, choices=list_benchmark_ids())
     parser.add_argument("--env", default=None, choices=list_env_names())
     parser.add_argument("--temporal_encoding", type=str, default="none",
@@ -75,13 +75,16 @@ def main() -> None:
     parser.add_argument("--training_mode", type=str, default="two_phase",
                         choices=["two_phase", "end_to_end", "joint"],
                         help="'two_phase': concept net frozen during PPO update (LICORICE-style); "
-                             "'end_to_end': policy gradient flows through concept net jointly")
+                             "'end_to_end': policy gradient flows through concept net; "
+                             "'joint': end_to_end plus per-iteration supervised rollout concept updates")
     parser.add_argument("--seed",              type=int,   default=42)
     parser.add_argument("--total_timesteps",   type=int,   default=None)
     parser.add_argument("--num_labels",        type=int,   default=None,
                         help="Total labeled samples across all queries")
     parser.add_argument("--query_num_times",   type=int,   default=None,
                         help="How many times to query labels during training")
+    parser.add_argument("--gvf_pairing", type=str, default=None,
+                        help="Comma-separated 0-based concept indices for GVF heads; defaults to all concepts")
     parser.add_argument("--n_envs",            type=int,   default=4)
     parser.add_argument("--n_steps",           type=int,   default=512)
     parser.add_argument("--n_epochs",          type=int,   default=10)
@@ -113,6 +116,13 @@ def main() -> None:
         args.num_labels = benchmark_spec.canonical_num_labels if benchmark_spec is not None else 500
     if args.query_num_times is None:
         args.query_num_times = benchmark_spec.canonical_query_num_times if benchmark_spec is not None else 1
+    gvf_pairing = None
+    if args.gvf_pairing:
+        gvf_pairing = [
+            int(part.strip())
+            for part in args.gvf_pairing.split(",")
+            if part.strip()
+        ]
 
     set_seed(args.seed)
 
@@ -133,6 +143,7 @@ def main() -> None:
         "total_timesteps": args.total_timesteps,
         "num_labels": args.num_labels,
         "query_num_times": args.query_num_times,
+        "gvf_pairing": gvf_pairing,
         "n_envs": args.n_envs,
         "n_steps": args.n_steps,
         "n_epochs": args.n_epochs,
@@ -156,6 +167,8 @@ def main() -> None:
         "cuda" if torch.cuda.is_available() else "cpu"
     )
     policy_kwargs["temporal_encoding"] = args.temporal_encoding
+    if args.method == "gvf" and gvf_pairing is not None:
+        policy_kwargs["gvf_pairing"] = gvf_pairing
 
     # ---- PPO ----
     model = PPO(
