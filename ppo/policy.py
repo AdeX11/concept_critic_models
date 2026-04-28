@@ -259,10 +259,15 @@ class ActorCriticPolicy(nn.Module):
         self,
         features: torch.Tensor,
         h_prev: Optional[torch.Tensor],
+        concept_override: Optional[torch.Tensor] = None,
     ):
         """
-        Returns (latent, h_new, c_t, concept_extras)
+        Returns (latent, h_new, c_t, concept_extras).
         concept_extras: (V_c, concept_dists) or (None, None)
+
+        concept_override: [B, n_concepts] tensor. When provided, replaces c_t
+        after the concept net runs but before mlp_extractor. Used for steerability
+        evaluation (correct / flipped concept interventions).
         """
         h_new = None
         V_c = None
@@ -273,9 +278,13 @@ class ActorCriticPolicy(nn.Module):
             c_t = None
         elif self.concept_net_type == "cbm":
             c_t, h_new = self.concept_net(features, h_prev)
+            if concept_override is not None:
+                c_t = concept_override
             latent = self.mlp_extractor(c_t)
         elif self.concept_net_type == "concept_ac":
             c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)
+            if concept_override is not None:
+                c_t = concept_override
             latent = self.mlp_extractor(c_t)
         else:
             raise ValueError(f"Unknown concept_net: {self.concept_net_type}")
@@ -338,10 +347,16 @@ class ActorCriticPolicy(nn.Module):
         obs,
         h_prev: Optional[torch.Tensor] = None,
         deterministic: bool = False,
+        concept_override: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Returns (action, h_new)."""
+        """
+        Returns (action, h_new).
+        concept_override: [B, n_concepts] — replaces concept bottleneck output
+        when set. Pass None for normal inference.
+        """
         features = self.extract_features(obs)
-        latent, h_new, _, _ = self._get_latent(features, h_prev)
+        latent, h_new, _, _ = self._get_latent(features, h_prev,
+                                                concept_override=concept_override)
         action_logits = self.action_net(latent)
         if deterministic:
             action = action_logits.argmax(dim=1)
