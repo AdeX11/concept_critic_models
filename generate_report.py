@@ -9,7 +9,7 @@ from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable
 )
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 import datetime
 
 OUT = "/glade/derecho/scratch/adadelek/results/tmaze_full/tmaze_sweep_report.pdf"
@@ -42,6 +42,12 @@ caption_style = ParagraphStyle("Caption", parent=styles["Normal"],
     fontSize=8.5, leading=11, spaceAfter=8, alignment=TA_CENTER,
     textColor=colors.HexColor("#555555"))
 
+cell_style = ParagraphStyle("Cell", parent=styles["Normal"],
+    fontSize=8, leading=11, alignment=TA_CENTER)
+
+cell_left_style = ParagraphStyle("CellLeft", parent=styles["Normal"],
+    fontSize=8, leading=11, alignment=TA_LEFT)
+
 # ---------------------------------------------------------------------------
 # Table helper -- alternating rows built with explicit BACKGROUND commands
 # ---------------------------------------------------------------------------
@@ -50,15 +56,37 @@ ALT_ROW_BG = colors.HexColor("#f0f4f8")
 GRID_COLOR = colors.HexColor("#cccccc")
 
 
-def make_table(data, col_widths, header_rows=1):
-    t = Table(data, colWidths=col_widths, repeatRows=header_rows)
+def _wrap(val, is_header=False, left_align=False):
+    """Convert a string cell to a Paragraph so it wraps inside the column."""
+    if isinstance(val, str):
+        style = cell_style
+        if left_align:
+            style = cell_left_style
+        if is_header:
+            style = ParagraphStyle("CellHdr", parent=cell_style,
+                textColor=colors.white, fontName="Helvetica-Bold")
+        return Paragraph(val, style)
+    return val
+
+
+def _wrap_data(data, header_rows=1, left_cols=None):
+    """Wrap every cell in data as a Paragraph. left_cols: set of col indices to left-align."""
+    left_cols = left_cols or set()
+    out = []
+    for r, row in enumerate(data):
+        is_hdr = r < header_rows
+        out.append([_wrap(cell, is_header=is_hdr,
+                          left_align=(c in left_cols and not is_hdr))
+                    for c, cell in enumerate(row)])
+    return out
+
+
+def make_table(data, col_widths, header_rows=1, left_cols=None):
+    wrapped = _wrap_data(data, header_rows=header_rows, left_cols=left_cols)
+    t = Table(wrapped, colWidths=col_widths, repeatRows=header_rows)
 
     base = [
         ("BACKGROUND",   (0, 0), (-1, header_rows - 1), HEADER_BG),
-        ("TEXTCOLOR",    (0, 0), (-1, header_rows - 1), colors.white),
-        ("FONTNAME",     (0, 0), (-1, header_rows - 1), "Helvetica-Bold"),
-        ("FONTSIZE",     (0, 0), (-1, -1), 8),
-        ("ALIGN",        (0, 0), (-1, -1), "CENTER"),
         ("VALIGN",       (0, 0), (-1, -1), "MIDDLE"),
         ("GRID",         (0, 0), (-1, -1), 0.4, GRID_COLOR),
         ("TOPPADDING",   (0, 0), (-1, -1), 4),
@@ -174,7 +202,7 @@ design_data = [
     ["CBM", "6", "{gru, stacked, none} x {frozen, coupled},  supervision=online"],
     ["Concept-AC", "12", "{gru, stacked, none} x {online, none} x {frozen, coupled}"],
 ]
-story.append(make_table(design_data, [1.5*inch, 0.6*inch, 4.4*inch]))
+story.append(make_table(design_data, [1.5*inch, 0.6*inch, 4.4*inch], left_cols={2}))
 story.append(p("Table 1. Run groups.", caption_style))
 
 story += [
@@ -406,7 +434,7 @@ summary_data = [
      "the highest concept accuracy in the experiment and near-best task performance. "
      "Interpretable concepts can emerge without ground truth annotation."],
 ]
-story.append(make_table(summary_data, [1.0*inch, 1.2*inch, 4.3*inch]))
+story.append(make_table(summary_data, [1.0*inch, 1.2*inch, 4.3*inch], left_cols={2}))
 story.append(p("Table 7. Summary of findings in priority order.", caption_style))
 
 story += [
