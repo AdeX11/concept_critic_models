@@ -2,17 +2,17 @@
 networks.py — Concept bottleneck network architectures.
 
 Two concept modules:
-  1. FlexibleMultiTaskNetwork  — LICORICE-style single-step CBM (no temporal state)
-  2. ConceptActorCritic        — concept actor + concept critic (new method)
+  1. CBMNetwork         — supervised concept bottleneck model (single-step, no temporal state)
+  2. ConceptActorCritic — concept actor + concept critic (actor-critic training signal)
 
-ConceptActorCritic supports three temporal encodings (temporal_encoding arg):
+ConceptActorCritic supports three temporal encodings (temporal arg):
   'gru'     — GRUCell carries hidden state across steps (network-level temporal)
   'stacked' — no GRU; temporal info comes from frame-stacked observations (env-level)
   'none'    — no temporal encoding at all (ablation baseline)
 
 For 'stacked' and 'none', ConceptActorCritic uses plain linear heads identical in
-architecture to FlexibleMultiTaskNetwork, but is trained with the actor-critic
-discounted concept reward signal rather than single-step supervised loss.
+architecture to CBMNetwork, but trained with the actor-critic discounted concept
+reward signal rather than single-step supervised loss.
 """
 
 from typing import List, Optional, Tuple
@@ -24,21 +24,20 @@ from torch.distributions import Categorical, Normal
 
 
 # ---------------------------------------------------------------------------
-# FlexibleMultiTaskNetwork
+# CBMNetwork
 # ---------------------------------------------------------------------------
 
-class FlexibleMultiTaskNetwork(nn.Module):
+class CBMNetwork(nn.Module):
     """
-    Baseline concept bottleneck module used in vanilla_freeze.
+    Supervised concept bottleneck model used by the 'cbm' concept_net method.
 
     For each concept:
       - classification: nn.Linear(feature_dim, K)  → argmax → integer class
       - regression:     nn.Linear(feature_dim, 1)  → scalar
 
-    temporal_encoding='gru' adds a GRUCell before the heads (same hidden_dim
-    as ConceptActorCritic) so vanilla_freeze can maintain temporal state.
-    This makes the comparison with concept_actor_critic fair: both have the
-    same GRU architecture; the difference is only the training signal.
+    temporal='gru' adds a GRUCell before the heads (same hidden_dim as
+    ConceptActorCritic) so cbm can maintain temporal state for a fair
+    architectural comparison — the only difference is the training signal.
 
     forward(x, h_prev) returns ([B, n_concepts], h_t or None).
     get_logits(x, h_prev) returns (list of raw tensors, h_t or None).
@@ -175,8 +174,7 @@ class ConceptActorCritic(nn.Module):
                   no temporal information (ablation)
 
     All three variants are trained with the actor-critic discounted concept reward
-    signal, distinguishing them from FlexibleMultiTaskNetwork regardless of
-    temporal encoding.
+    signal, distinguishing them from CBMNetwork regardless of temporal encoding.
 
     forward(features, h_prev) → (c_t, h_t, concept_dists, V_c)
       c_t:           [B, n_concepts]

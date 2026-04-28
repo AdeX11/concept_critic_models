@@ -5,7 +5,7 @@ Produces:
   1. Learning curves (mean reward vs timesteps)  → learning_curves.png
   2. Concept accuracy per concept (static vs temporal split)  → concept_accuracy.png
   3. Summary table (mean ± std reward)  → summary_table.txt
-  4. Concept critic value correlation (concept_actor_critic only)  → value_correlation.png
+  4. Concept critic value correlation (concept_ac only)  → value_correlation.png
 
 Usage:
   python compare.py --env lunar_lander --seeds 42 123 456 --total_timesteps 500000
@@ -36,16 +36,16 @@ from envs.lunar_lander      import (make_lunar_lander_env,      make_single_luna
 from ppo.ppo                import PPO
 
 
-METHODS = ["no_concept", "vanilla_freeze", "concept_actor_critic"]
+METHODS = ["none", "cbm", "concept_ac"]
 METHOD_LABELS = {
-    "no_concept":           "No Concept (PPO)",
-    "vanilla_freeze":       "Vanilla Freeze (CBM)",
-    "concept_actor_critic": "Concept Actor-Critic",
+    "none":       "PPO (no concepts)",
+    "cbm":        "CBM (supervised)",
+    "concept_ac": "Concept Actor-Critic",
 }
 METHOD_COLORS = {
-    "no_concept":           "#1f77b4",
-    "vanilla_freeze":       "#ff7f0e",
-    "concept_actor_critic": "#2ca02c",
+    "none":       "#1f77b4",
+    "cbm":        "#ff7f0e",
+    "concept_ac": "#2ca02c",
 }
 
 
@@ -103,7 +103,7 @@ def smooth(values: np.ndarray, window: int = 20) -> np.ndarray:
 
 
 def run_single(
-    method: str,
+    concept_net: str,
     env_name: str,
     seed: int,
     total_timesteps: int,
@@ -114,58 +114,60 @@ def run_single(
     batch_size: int,
     device: str,
     out_dir: str,
-    temporal_encoding: str = "none",
-    training_mode: str = "two_phase",
+    temporal: str = "none",
+    freeze_concept: bool = True,
+    supervision: str = "queried",
 ) -> dict:
-    """Train one method/seed and return metrics dict."""
+    """Train one concept_net/seed combination and return metrics dict."""
     set_seed(seed)
-    n_stack = 4 if temporal_encoding == "stacked" else 1
+    n_stack = 4 if temporal == "stacked" else 1
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
         env_name, n_envs, seed, n_stack=n_stack
     )
     dev = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     policy_kwargs["device"] = dev
-    policy_kwargs["temporal_encoding"] = temporal_encoding
+    policy_kwargs["temporal_encoding"] = temporal
 
     model = PPO(
-        method        = method,
-        env           = vec_env,
-        policy_kwargs = policy_kwargs,
-        n_steps       = n_steps,
-        n_epochs      = 10,
-        batch_size    = batch_size,
-        gamma         = 0.99,
-        gae_lambda    = 0.95,
-        clip_range    = 0.2,
-        ent_coef      = 0.01,
-        vf_coef       = 0.5,
-        max_grad_norm = 0.5,
-        learning_rate = 3e-4,
-        lambda_v      = 0.5,
-        lambda_s      = 0.5,
-        training_mode = training_mode,
+        concept_net    = concept_net,
+        env            = vec_env,
+        policy_kwargs  = policy_kwargs,
+        n_steps        = n_steps,
+        n_epochs       = 10,
+        batch_size     = batch_size,
+        gamma          = 0.99,
+        gae_lambda     = 0.95,
+        clip_range     = 0.2,
+        ent_coef       = 0.01,
+        vf_coef        = 0.5,
+        max_grad_norm  = 0.5,
+        learning_rate  = 3e-4,
+        lambda_v       = 0.5,
+        lambda_s       = 0.5,
+        freeze_concept = freeze_concept,
+        supervision    = supervision,
         normalize_advantage = True,
-        seed          = seed,
-        device        = device,
-        verbose       = 1,
+        seed           = seed,
+        device         = device,
+        verbose        = 1,
     )
 
     labels_per_query = max(1, num_labels // max(query_num_times, 1))
     model.learn(
         total_timesteps       = total_timesteps,
-        query_num_times       = query_num_times if method != "no_concept" else 0,
+        query_num_times       = query_num_times if concept_net != "none" else 0,
         query_labels_per_time = labels_per_query,
     )
 
     mean_r, std_r = model.evaluate(n_episodes=20, deterministic=True)
 
     # ---- Save model ----
-    model_path = os.path.join(out_dir, f"{method}_seed{seed}_model.pt")
+    model_path = os.path.join(out_dir, f"{concept_net}_seed{seed}_model.pt")
     torch.save(model.policy.state_dict(), model_path)
 
-    task_types      = single_env.task_types
-    concept_names   = single_env.concept_names
-    temporal_concs  = getattr(single_env, "temporal_concepts", [])
+    task_types        = single_env.task_types
+    concept_names     = single_env.concept_names
+    temporal_concepts = getattr(single_env, "temporal_concepts", [])
 
     vec_env.close()
     single_env.close()
@@ -174,10 +176,10 @@ def run_single(
         "rewards":           np.array(model.episode_reward_history, dtype=np.float32),
         "mean_reward":       mean_r,
         "std_reward":        std_r,
-        "concept_acc_log":   model.concept_acc_log,   # [(timestep, {name: metric})]
+        "concept_acc_log":   model.concept_acc_log,
         "task_types":        task_types,
         "concept_names":     concept_names,
-        "temporal_concepts": temporal_concs,
+        "temporal_concepts": temporal_concepts,
     }
 
 
@@ -186,7 +188,7 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
     Roll out model for ~200 steps in single env and compute per-concept metrics.
     Returns {concept_name: metric_value}.
     """
-    if model.method == "no_concept":
+    if model.concept_net == "none":
         return {}
 
     concept_names = single_env.concept_names
@@ -203,7 +205,7 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
     from ppo.networks import ConceptActorCritic
     use_gru = (
         getattr(model, "temporal_encoding", "none") == "gru"
-        and model.method == "concept_actor_critic"
+        and model.concept_net == "concept_ac"
     )
     h_t = torch.zeros(1, ConceptActorCritic.HIDDEN_DIM, device=model.device) if use_gru else None
 
@@ -222,7 +224,7 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
         # Single forward pass: extract concepts and action together (avoids double GRU advance)
         with torch.no_grad():
             features = model.policy.extract_features(obs_t)
-            if model.method == "concept_actor_critic":
+            if model.concept_net == "concept_ac":
                 c_t, h_new, _, _ = model.policy.concept_net(features, h_t)
                 latent = model.policy.mlp_extractor(c_t)
                 action_logits = model.policy.action_net(latent)
@@ -230,7 +232,7 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
                 if h_new is not None:
                     h_t = h_new
             else:
-                c_t = model.policy.concept_net(features)
+                c_t, _ = model.policy.concept_net(features, None)
                 latent = model.policy.mlp_extractor(c_t)
                 action_logits = model.policy.action_net(latent)
                 action = action_logits.argmax(dim=1)
@@ -322,7 +324,7 @@ def plot_concept_accuracy_over_time(
     plotted = False
 
     for method in METHODS:
-        if method not in results or method == "no_concept":
+        if method not in results or method == "none":
             continue
         # Use first seed only (single-seed experiment)
         seed_res = next(iter(results[method].values()))
@@ -387,7 +389,7 @@ def plot_concept_accuracy_final(
         return
 
     n = len(concept_names)
-    concept_methods = [m for m in METHODS if m != "no_concept" and m in results]
+    concept_methods = [m for m in METHODS if m != "none" and m in results]
     if not concept_methods:
         return
 
@@ -470,17 +472,20 @@ def write_summary_table(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare three RL methods on a single environment.")
+    parser = argparse.ArgumentParser(description="Compare concept_net types on a single environment.")
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state"])
     parser.add_argument("--methods", nargs="+", default=METHODS,
-                        choices=METHODS, help="Subset of methods to compare")
-    parser.add_argument("--temporal_encoding", type=str, default="none",
+                        choices=METHODS, help="Subset of concept_net types to compare")
+    parser.add_argument("--temporal", type=str, default="none",
                         choices=["gru", "stacked", "none"],
-                        help="Temporal encoding for concept_actor_critic")
-    parser.add_argument("--training_mode", type=str, default="two_phase",
-                        choices=["two_phase", "end_to_end"],
-                        help="'two_phase': concept net frozen during PPO; 'end_to_end': joint training")
+                        help="Temporal encoding: 'gru', 'stacked', or 'none'")
+    parser.add_argument("--supervision", type=str, default="queried",
+                        choices=["queried", "online"],
+                        help="'queried': supervised only at label query times; "
+                             "'online': supervised every iteration from rollout buffer")
+    parser.add_argument("--freeze_concept", action="store_true",
+                        help="Freeze concept net during policy gradient update")
     parser.add_argument("--seeds",   nargs="+", type=int, default=[42])
     parser.add_argument("--total_timesteps", type=int, default=500_000)
     parser.add_argument("--num_labels",      type=int, default=500)
@@ -496,7 +501,8 @@ def main() -> None:
     args = parser.parse_args()
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_tag = f"{args.env}_{args.training_mode}_{args.temporal_encoding}_{timestamp}"
+    freeze_str = "frozen" if args.freeze_concept else "coupled"
+    run_tag = f"{args.env}_{args.temporal}_{args.supervision}_{freeze_str}_{timestamp}"
     out_dir = os.path.join(args.output_dir, run_tag)
     plots_dir = os.path.join(args.plots_dir, run_tag)
     os.makedirs(out_dir, exist_ok=True)
@@ -515,24 +521,25 @@ def main() -> None:
         results[method] = {}
         for seed in args.seeds:
             print(f"\n{'='*60}")
-            print(f"[compare] method={method}  seed={seed}")
+            print(f"[compare] concept_net={method}  seed={seed}")
             print(f"{'='*60}")
             t0 = time.time()
             try:
                 res = run_single(
-                    method             = method,
-                    env_name           = args.env,
-                    seed               = seed,
-                    total_timesteps    = args.total_timesteps,
-                    num_labels         = args.num_labels,
-                    query_num_times    = args.query_num_times,
-                    n_envs             = args.n_envs,
-                    n_steps            = args.n_steps,
-                    batch_size         = args.batch_size,
-                    device             = args.device,
-                    out_dir            = out_dir,
-                    temporal_encoding  = args.temporal_encoding,
-                    training_mode      = args.training_mode,
+                    concept_net    = method,
+                    env_name       = args.env,
+                    seed           = seed,
+                    total_timesteps= args.total_timesteps,
+                    num_labels     = args.num_labels,
+                    query_num_times= args.query_num_times,
+                    n_envs         = args.n_envs,
+                    n_steps        = args.n_steps,
+                    batch_size     = args.batch_size,
+                    device         = args.device,
+                    out_dir        = out_dir,
+                    temporal       = args.temporal,
+                    freeze_concept = args.freeze_concept,
+                    supervision    = args.supervision,
                 )
                 results[method][seed] = res
                 elapsed = time.time() - t0

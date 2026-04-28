@@ -1,16 +1,18 @@
 """
-ppo.py — Core PPO algorithm supporting all three concept methods.
+ppo.py — Core PPO algorithm supporting all three concept_net types.
 
-Two training phases per iteration:
-  Phase 1: train_policy()    — standard PPO clipped surrogate
-  Phase 2: train_concepts()  — method-specific concept learning
+Each iteration:
+  1. collect_rollouts()          — fill buffer
+  2. train_policy()              — standard PPO clipped surrogate
+  3. (if supervision=='online')  — supervised anchor from rollout buffer every iteration
+  4. train_concept_actor_critic() — PPO-style concept AC update (concept_ac only)
 
-training_mode controls how concept network parameters interact with policy training:
-  'two_phase'   — concept net is FROZEN during train_policy() (uses optimizer_exclude_concept);
-                  updated only via supervised / concept actor-critic loss in train_concepts().
-                  Mirrors the LICORICE paper's vanilla_freeze setup.
-  'end_to_end'  — concept net parameters are included in the policy gradient step
-                  (uses full optimizer); gradients from policy loss flow through concept net.
+Key parameters:
+  concept_net    : 'none' | 'cbm' | 'concept_ac'
+  freeze_concept : if True, concept net is excluded from the policy optimizer
+                   (policy gradient does NOT flow through it)
+  supervision    : 'queried' — supervised anchor only at explicit label query times
+                   'online'  — supervised anchor from rollout buffer every iteration
 
 Label collection is simple random sampling (no active learning).
 """
@@ -43,15 +45,15 @@ def _obs_to_numpy(obs):
 
 class PPO:
     """
-    Proximal Policy Optimization supporting:
-      - no_concept
-      - vanilla_freeze
-      - concept_actor_critic
+    Proximal Policy Optimization supporting concept_net types:
+      - 'none'       — plain PPO, no concept bottleneck
+      - 'cbm'        — supervised concept bottleneck model
+      - 'concept_ac' — concept actor-critic
     """
 
     def __init__(
         self,
-        method: str,
+        concept_net: str,
         env,                          # vectorised gym env (n_envs)
         policy_kwargs: dict,
         n_steps: int = 2048,
@@ -64,26 +66,28 @@ class PPO:
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         learning_rate: float = 3e-4,
-        # concept_actor_critic weights
+        # concept_ac loss weights
         lambda_v: float = 0.5,        # concept critic loss weight
-        lambda_s: float = 0.5,        # supervised anchor weight
-        concept_ac_epochs: Optional[int] = None,  # epochs for concept AC update; defaults to n_epochs
-        # training settings
-        training_mode: str = "two_phase",   # 'two_phase' | 'end_to_end'
+        lambda_s: float = 0.5,        # supervised anchor loss weight
+        concept_ac_epochs: Optional[int] = None,  # defaults to n_epochs
+        # concept net training settings
+        freeze_concept: bool = True,  # exclude concept net from policy optimizer
+        supervision: str = "queried", # 'queried' | 'online'
         normalize_advantage: bool = True,
         seed: int = 0,
         device: str = "auto",
         verbose: int = 1,
     ):
-        assert method in ("no_concept", "vanilla_freeze", "concept_actor_critic"), (
-            f"Unknown method: {method}"
+        assert concept_net in ("none", "cbm", "concept_ac"), (
+            f"concept_net must be 'none', 'cbm', or 'concept_ac', got '{concept_net}'"
         )
-        assert training_mode in ("two_phase", "end_to_end", "joint"), (
-            f"training_mode must be 'two_phase', 'end_to_end', or 'joint', got '{training_mode}'"
+        assert supervision in ("queried", "online", "none"), (
+            f"supervision must be 'queried', 'online', or 'none', got '{supervision}'"
         )
 
-        self.method = method
-        self.training_mode = training_mode
+        self.concept_net = concept_net
+        self.freeze_concept = freeze_concept
+        self.supervision = supervision
         self.env = env
         self.n_envs = env.num_envs
         self.n_steps = n_steps
@@ -116,7 +120,7 @@ class PPO:
         # ---- Policy ----
         self.policy = ActorCriticPolicy(
             **policy_kwargs,
-            method=method,
+            concept_net=concept_net,
             temporal_encoding=temporal_encoding,
         ).to(self.device)
         self.policy.update_lr(learning_rate)
@@ -191,9 +195,10 @@ class PPO:
         t_start = time.time()
 
         while self.num_timesteps < total_timesteps:
-            # ---- Query concept labels ----
+            # ---- Query concept labels (queried supervision only) ----
             if (
-                self.method != "no_concept"
+                self.concept_net != "none"
+                and self.supervision == "queried"
                 and query_count < query_num_times
                 and self.num_timesteps >= next_query_at - 1
             ):
@@ -216,11 +221,14 @@ class PPO:
             # ---- Train policy ----
             policy_stats = self.train_policy()
 
-            # ---- Joint concept supervision from rollout buffer (every iteration) ----
-            if self.method != "no_concept" and self.training_mode == "joint":
+            # ---- Online supervised anchor from rollout buffer (every iteration) ----
+            # For GRU: runs _train_concepts_bptt (sequential, gradients through time).
+            # For non-GRU: runs train_concepts on flattened buffer (random-batch).
+            # Note: for concept_ac+gru, train_concept_actor_critic() below ALSO runs
+            # a separate BPTT pass (_train_concept_ac_bptt) — that is the AC reward
+            # signal; this block is the supervised label signal. They are independent.
+            if self.concept_net != "none" and self.supervision == "online":
                 if self.temporal_encoding == "gru":
-                    # BPTT: process buffer as a sequence so gradients flow
-                    # through the GRU across time steps
                     self._train_concepts_bptt(n_epochs=self.n_epochs)
                 else:
                     buf = self.rollout_buffer
@@ -237,7 +245,7 @@ class PPO:
 
             # ---- Concept accuracy tracking (every 10 iters) ----
             concept_loss_log = {}
-            if self.method != "no_concept" and iteration % 10 == 0:
+            if self.concept_net != "none" and iteration % 10 == 0:
                 acc = self._compute_concept_accuracy_from_buffer()
                 if acc:
                     self.concept_acc_log.append((self.num_timesteps, acc))
@@ -281,7 +289,7 @@ class PPO:
     def collect_rollouts(self) -> None:
         """
         Run policy for n_steps, fill rollout buffer.
-        Carries GRU hidden state across steps for concept_actor_critic.
+        Carries GRU hidden state across steps for concept_ac.
         Resets h_t at episode boundaries.
         """
         self.policy.set_training_mode(False)
@@ -295,7 +303,7 @@ class PPO:
             obs_tensor = _obs_to_tensor(obs, self.device)
 
             with torch.no_grad():
-                if self.method == "concept_actor_critic":
+                if self.concept_net == "concept_ac":
                     # Reset hidden state at episode boundaries
                     if self.temporal_encoding == "gru":
                         reset_mask = torch.as_tensor(
@@ -321,8 +329,8 @@ class PPO:
                     concept_value = V_c
                     if h_new is not None:
                         h_t = h_new
-                elif self.method == "vanilla_freeze" and self.temporal_encoding == "gru":
-                    # vanilla_freeze + GRU: track h_t so BPTT training has valid sequences
+                elif self.concept_net == "cbm" and self.temporal_encoding == "gru":
+                    # cbm + GRU: track h_t so BPTT training has valid sequences
                     reset_mask = torch.as_tensor(
                         episode_starts, dtype=torch.float32, device=self.device
                     ).unsqueeze(1)
@@ -361,7 +369,7 @@ class PPO:
                 eval_mask = np.ones(self.n_envs, dtype=np.float32)
 
             concept_reward = None
-            if self.method == "concept_actor_critic" and c_t is not None:
+            if self.concept_net == "concept_ac" and c_t is not None:
                 concept_reward = self._compute_concept_reward(
                     c_t.cpu().numpy(), concepts
                 ) * eval_mask
@@ -417,7 +425,7 @@ class PPO:
         # Compute GAE
         with torch.no_grad():
             obs_tensor = _obs_to_tensor(obs, self.device)
-            if self.method == "concept_actor_critic":
+            if self.concept_net == "concept_ac":
                 reset_mask = torch.as_tensor(
                     episode_starts, dtype=torch.float32, device=self.device
                 ).unsqueeze(1)
@@ -427,7 +435,7 @@ class PPO:
                 latent = self.policy.mlp_extractor(c_t)
                 last_values = self.policy.value_net(latent).flatten()
                 last_concept_values = V_c_last.flatten()
-            elif self.method == "vanilla_freeze" and self.temporal_encoding == "gru":
+            elif self.concept_net == "cbm" and self.temporal_encoding == "gru":
                 reset_mask = torch.as_tensor(
                     episode_starts, dtype=torch.float32, device=self.device
                 ).unsqueeze(1)
@@ -444,7 +452,7 @@ class PPO:
         self.rollout_buffer.compute_returns_and_advantage(
             last_values, dones=episode_starts.astype(np.float32)
         )
-        if self.method == "concept_actor_critic":
+        if self.concept_net == "concept_ac":
             self.rollout_buffer.compute_concept_returns_and_advantage(
                 last_concept_values, dones=episode_starts.astype(np.float32)
             )
@@ -458,15 +466,14 @@ class PPO:
         Standard PPO clipped surrogate loss.
 
         Optimizer selection:
-          two_phase   — optimizer_exclude_concept: concept net frozen, updated only in
-                        train_concepts(). Mirrors LICORICE vanilla_freeze training.
-          end_to_end  — full optimizer: policy gradient flows through concept net,
-                        updating it jointly with the actor/critic heads.
-          no_concept  — always uses full optimizer (no concept net to freeze).
+          freeze_concept=True  — optimizer_exclude_concept: concept net excluded from
+                                 policy gradient. Updated separately via supervision.
+          freeze_concept=False — full optimizer: policy gradient flows through concept net.
+          concept_net='none'   — always uses full optimizer (no concept net to freeze).
         """
         self.policy.set_training_mode(True)
 
-        if self.method != "no_concept" and self.training_mode in ("two_phase", "joint"):
+        if self.concept_net != "none" and self.freeze_concept:
             optimizer = self.policy.optimizer_exclude_concept
         else:
             optimizer = self.policy.optimizer
@@ -536,7 +543,7 @@ class PPO:
           task actor   ← updated by value critic advantages    (train_policy)
           concept actor ← updated by concept critic advantages (train_concept_actor_critic)
         """
-        if self.method != "concept_actor_critic":
+        if self.concept_net != "concept_ac":
             return {}
 
         # Use BPTT sequence training for GRU so gradients flow across time steps
@@ -627,11 +634,11 @@ class PPO:
         """
         Supervised concept training on labeled samples (called at query times only).
 
-        vanilla_freeze:       CrossEntropy/MSE on labeled samples.
-        concept_actor_critic: supervised anchor only — the AC update runs every
-                              iteration via train_concept_actor_critic().
+        cbm:        CrossEntropy/MSE on labeled samples.
+        concept_ac: supervised anchor only — the AC update runs every
+                    iteration via train_concept_actor_critic().
         """
-        if self.method == "no_concept":
+        if self.concept_net == "none":
             return {}
 
         self.policy.set_training_mode(True)
@@ -664,11 +671,11 @@ class PPO:
 
                 features = self.policy.extract_features(obs_b)
 
-                if self.method == "vanilla_freeze":
+                if self.concept_net == "cbm":
                     logits, _ = concept_net.get_logits(features, None)
                     loss   = concept_net.compute_loss(logits, c_b)
                 else:
-                    # concept_actor_critic: supervised anchor weighted by lambda_s
+                    # concept_ac: supervised anchor weighted by lambda_s
                     logits, _ = concept_net.get_logits(features)
                     loss = self.lambda_s * concept_net.compute_concept_loss(logits, c_b)
 
@@ -686,7 +693,7 @@ class PPO:
 
         if self.verbose:
             print(
-                f"  [{self.method}] supervised anchor: "
+                f"  [{self.concept_net}] supervised anchor: "
                 f"initial_loss={concept_losses[0]:.4f}  "
                 f"final_loss={concept_losses[-1]:.4f} "
                 f"over {n_epochs} epochs"
@@ -705,7 +712,7 @@ class PPO:
         """
         Supervised concept training via BPTT over the full rollout sequence.
 
-        Replaces random-batch train_concepts for GRU methods in joint mode.
+        Replaces random-batch train_concepts for GRU methods in online supervision mode.
         Processes all N envs in parallel as sequences of T steps, resetting
         h_t at episode boundaries.  Gradients flow back through the GRU
         across time so it can learn to latch and maintain temporal concepts.
@@ -739,7 +746,7 @@ class PPO:
 
                 features = self.policy.extract_features(obs_t)
 
-                if self.method == "vanilla_freeze":
+                if self.concept_net == "cbm":
                     logits, h_t = concept_net.get_logits(features, h_t)
                     loss_t = concept_net.compute_loss(logits, c_true_t)
                 else:
@@ -874,7 +881,7 @@ class PPO:
             if self.temporal_encoding == "gru":
                 # Sequential evaluation for any GRU method: carry h_t in
                 # timestep order so the GRU sees proper temporal context.
-                # Both vanilla_freeze+gru and concept_ac+gru need this —
+                # Both cbm+gru and concept_ac+gru need this —
                 # chunked evaluation with h_prev=None breaks GRU continuity.
                 h_t = torch.zeros(N, self.hidden_dim, device=self.device)
                 for step in range(T):
@@ -895,7 +902,7 @@ class PPO:
                     h_t = h_t * (1.0 - ep_start)
 
                     features = self.policy.extract_features(obs_t)
-                    if self.method == "vanilla_freeze":
+                    if self.concept_net == "cbm":
                         c_pred, h_t = self.policy.concept_net(features, h_t)
                     else:
                         c_pred, h_t, _, _ = self.policy.concept_net(features, h_t)
@@ -927,7 +934,7 @@ class PPO:
                         dtype=torch.float32
                     )
                     features = self.policy.extract_features(obs_flat)
-                    if self.method == "vanilla_freeze":
+                    if self.concept_net == "cbm":
                         c_pred_chunk, _ = self.policy.concept_net(features, None)
                     else:
                         c_pred_chunk, _, _, _ = self.policy.concept_net(features, None)
@@ -1007,7 +1014,7 @@ class PPO:
 
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.method == "concept_actor_critic":
+                if self.concept_net == "concept_ac":
                     actions, h_new = self.policy.predict(obs_t, h_t)
                     if h_new is not None:
                         h_t = h_new
@@ -1141,7 +1148,7 @@ class PPO:
         while done_count < n_episodes:
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.method == "concept_actor_critic":
+                if self.concept_net == "concept_ac":
                     actions, h_new = self.policy.predict(obs_t, h_t, deterministic)
                     if h_new is not None:
                         h_t = h_new

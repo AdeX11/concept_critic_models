@@ -2,14 +2,21 @@
 train.py — Unified training entry point.
 
 Usage:
-  python train.py --method no_concept           --env cartpole           --seed 42
-  python train.py --method vanilla_freeze        --env dynamic_obstacles  --seed 42
-  python train.py --method concept_actor_critic  --env lunar_lander       --seed 42
+  python train.py --concept_net none       --env cartpole          --seed 42
+  python train.py --concept_net cbm        --env dynamic_obstacles --seed 42 --freeze_concept
+  python train.py --concept_net concept_ac --env lunar_lander      --seed 42 --temporal gru
 
-All results are saved to results/<method>_<env>_seed<seed>/ as:
-  - rewards.npy       — episode reward history
-  - concept_acc.npy   — concept accuracy log (if applicable)
-  - model.pt          — saved policy state_dict
+Parameters:
+  --concept_net   : none | cbm | concept_ac   (what concept network architecture)
+  --temporal      : none | stacked | gru       (temporal encoding)
+  --supervision   : queried | online | none    (when supervised anchor fires)
+  --freeze_concept: flag — freeze concept net during policy gradient update
+
+Output: results/<concept_net>_<temporal>_<supervision>_<frozen|coupled>_<env>_seed<seed>/
+  - rewards.npy      — episode reward history
+  - concept_acc.npz  — concept accuracy log (if applicable)
+  - model.pt         — saved policy state_dict
+  - eval.txt         — final eval reward
 """
 
 import argparse
@@ -109,21 +116,30 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RL agent with optional concept bottleneck.")
-    parser.add_argument("--method", required=True,
-                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
+    parser.add_argument("--concept_net", required=True,
+                        choices=["none", "cbm", "concept_ac"],
+                        help="Concept network architecture: "
+                             "'none' (plain PPO), "
+                             "'cbm' (supervised concept bottleneck), "
+                             "'concept_ac' (concept actor-critic)")
     parser.add_argument("--env",    required=True,
                         choices=["cartpole", "dynamic_obstacles", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
                                  "mountain_car", "hidden_velocity", "tmaze"])
-    parser.add_argument("--temporal_encoding", type=str, default="none",
+    parser.add_argument("--temporal", type=str, default="none",
                         choices=["gru", "stacked", "none"],
-                        help="Temporal encoding for concept_actor_critic: "
-                             "'gru' (GRUCell in network), 'stacked' (env-level frame stack), "
-                             "'none' (no temporal info, ablation)")
-    parser.add_argument("--training_mode", type=str, default="two_phase",
-                        choices=["two_phase", "end_to_end", "joint"],
-                        help="'two_phase': concept net frozen during PPO update (LICORICE-style); "
-                             "'end_to_end': policy gradient flows through concept net jointly")
+                        help="Temporal encoding: "
+                             "'gru' (GRUCell hidden state), "
+                             "'stacked' (env-level frame stack), "
+                             "'none' (single-frame, no memory)")
+    parser.add_argument("--supervision", type=str, default="queried",
+                        choices=["queried", "online", "none"],
+                        help="When supervised anchor fires: "
+                             "'queried' (only at explicit label query times), "
+                             "'online' (every PPO iteration from rollout buffer)")
+    parser.add_argument("--freeze_concept", action="store_true",
+                        help="Freeze concept net during policy gradient update "
+                             "(concept net updated only via supervision, not policy loss)")
     parser.add_argument("--seed",              type=int,   default=42)
     parser.add_argument("--total_timesteps",   type=int,   default=1_000_000)
     parser.add_argument("--num_labels",        type=int,   default=500,
@@ -138,26 +154,29 @@ def main() -> None:
     parser.add_argument("--ent_coef",          type=float, default=0.01)
     parser.add_argument("--vf_coef",           type=float, default=0.5)
     parser.add_argument("--lambda_v",          type=float, default=0.5,
-                        help="Concept critic loss weight (concept_actor_critic only)")
+                        help="Concept critic loss weight (concept_ac only)")
     parser.add_argument("--lambda_s",          type=float, default=0.5,
-                        help="Supervised anchor loss weight (concept_actor_critic only)")
+                        help="Supervised anchor loss weight (concept_ac only)")
     parser.add_argument("--device",            type=str,   default="auto")
     parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
-    out_dir = os.path.join(
-        args.output_dir,
-        f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{args.env}_seed{args.seed}"
-    )
+    if args.concept_net == "none":
+        run_tag = f"none_{args.env}_seed{args.seed}"
+    else:
+        freeze_str = "frozen" if args.freeze_concept else "coupled"
+        run_tag = f"{args.concept_net}_{args.temporal}_{args.supervision}_{freeze_str}_{args.env}_seed{args.seed}"
+    out_dir = os.path.join(args.output_dir, run_tag)
     os.makedirs(out_dir, exist_ok=True)
-    print(f"[train] method={args.method}  training_mode={args.training_mode}  "
-          f"temporal_encoding={args.temporal_encoding}  env={args.env}  seed={args.seed}")
+    print(f"[train] concept_net={args.concept_net}  temporal={args.temporal}  "
+          f"supervision={args.supervision}  freeze_concept={args.freeze_concept}  "
+          f"env={args.env}  seed={args.seed}")
     print(f"[train] output → {out_dir}")
 
     # n_stack=4 for frame-stacking temporal encoding, else 1
-    n_stack = 4 if args.temporal_encoding == "stacked" else 1
+    n_stack = 4 if args.temporal == "stacked" else 1
 
     # ---- Environment ----
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
@@ -166,11 +185,11 @@ def main() -> None:
     policy_kwargs["device"] = args.device if args.device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
     )
-    policy_kwargs["temporal_encoding"] = args.temporal_encoding
+    policy_kwargs["temporal_encoding"] = args.temporal
 
     # ---- PPO ----
     model = PPO(
-        method         = args.method,
+        concept_net    = args.concept_net,
         env            = vec_env,
         policy_kwargs  = policy_kwargs,
         n_steps        = args.n_steps,
@@ -185,7 +204,8 @@ def main() -> None:
         learning_rate  = args.learning_rate,
         lambda_v       = args.lambda_v,
         lambda_s       = args.lambda_s,
-        training_mode  = args.training_mode,
+        freeze_concept = args.freeze_concept,
+        supervision    = args.supervision,
         normalize_advantage = True,
         seed           = args.seed,
         device         = args.device,
@@ -195,8 +215,8 @@ def main() -> None:
     labels_per_query = max(1, args.num_labels // max(args.query_num_times, 1))
 
     model.learn(
-        total_timesteps   = args.total_timesteps,
-        query_num_times   = args.query_num_times if args.method != "no_concept" else 0,
+        total_timesteps       = args.total_timesteps,
+        query_num_times       = args.query_num_times if args.concept_net != "none" else 0,
         query_labels_per_time = labels_per_query,
     )
 

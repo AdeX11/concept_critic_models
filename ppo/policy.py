@@ -1,10 +1,10 @@
 """
-policy.py — ActorCriticPolicy supporting all three methods.
+policy.py — ActorCriticPolicy supporting all three concept_net types.
 
-Methods:
-  no_concept        — features → mlp_extractor → actor/critic
-  vanilla_freeze    — features → FlexibleMultiTaskNetwork → mlp_extractor → actor/critic
-  concept_actor_critic — features → ConceptActorCritic (GRU) → mlp_extractor → actor/critic
+concept_net:
+  'none'       — features → mlp_extractor → actor/critic  (plain PPO)
+  'cbm'        — features → CBMNetwork → mlp_extractor → actor/critic
+  'concept_ac' — features → ConceptActorCritic → mlp_extractor → actor/critic
 
 CNN feature extractor: NatureCNN for image observations, MLP for vector.
 Dict observations are handled by extracting the 'images' key (primary modality).
@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from .networks import FlexibleMultiTaskNetwork, ConceptActorCritic
+from .networks import CBMNetwork, ConceptActorCritic
 
 
 # ---------------------------------------------------------------------------
@@ -89,13 +89,13 @@ class MlpExtractor(nn.Module):
 
 class ActorCriticPolicy(nn.Module):
     """
-    Unified actor-critic policy for all three methods.
+    Unified actor-critic policy for all three concept_net types.
 
     Parameters
     ----------
     obs_shape    : tuple or dict of tuples
     n_actions    : int  (discrete action space size)
-    method       : 'no_concept' | 'vanilla_freeze' | 'concept_actor_critic'
+    concept_net  : 'none' | 'cbm' | 'concept_ac'
     task_types   : list of 'classification' | 'regression'  (one per concept)
     num_classes  : list of ints  (K per concept; 0 for regression)
     concept_dim  : total number of concepts
@@ -107,7 +107,7 @@ class ActorCriticPolicy(nn.Module):
         self,
         obs_shape,
         n_actions: int,
-        method: str,
+        concept_net: str,
         task_types: List[str],
         num_classes: List[int],
         concept_dim: int,
@@ -120,7 +120,7 @@ class ActorCriticPolicy(nn.Module):
         self.obs_shape = obs_shape
         self.obs_is_dict = isinstance(obs_shape, dict)
         self.n_actions = n_actions
-        self.method = method
+        self.concept_net_type = concept_net
         self.task_types = task_types
         self.num_classes = num_classes
         self.concept_dim = concept_dim
@@ -147,20 +147,20 @@ class ActorCriticPolicy(nn.Module):
 
         # ---- Concept module ----
         self.concept_net: Optional[nn.Module] = None
-        if method == "vanilla_freeze":
-            self.concept_net = FlexibleMultiTaskNetwork(
+        if concept_net == "cbm":
+            self.concept_net = CBMNetwork(
                 features_dim, task_types, num_classes,
                 temporal_encoding=temporal_encoding,
             )
-            mlp_input_dim = concept_dim          # integer concept vector → policy
-        elif method == "concept_actor_critic":
+            mlp_input_dim = concept_dim
+        elif concept_net == "concept_ac":
             self.concept_net = ConceptActorCritic(
                 features_dim, task_types, num_classes,
                 temporal_encoding=temporal_encoding,
             )
             mlp_input_dim = concept_dim
         else:
-            # no_concept
+            # none — plain PPO, no concept bottleneck
             mlp_input_dim = features_dim
 
         # ---- MLP extractor ----
@@ -195,11 +195,9 @@ class ActorCriticPolicy(nn.Module):
         else:
             self.optimizer_concept_only = None
 
-        # optimizer_concept_and_features: concept_net + features_extractor parameters
-        # Used by concept_actor_critic training so that concept signals shape the
-        # feature extractor (mirrors vanilla_freeze where concept supervision also
-        # flows through features_extractor), without touching mlp_extractor /
-        # action_net / value_net.
+        # optimizer_concept_and_features: concept_net + features_extractor parameters.
+        # Used for concept supervision so concept signals also shape the feature
+        # extractor, without touching mlp_extractor / action_net / value_net.
         if self.concept_net is not None:
             concept_and_feature_params = (
                 list(self.features_extractor.parameters()) +
@@ -270,17 +268,17 @@ class ActorCriticPolicy(nn.Module):
         V_c = None
         concept_dists = None
 
-        if self.method == "no_concept":
+        if self.concept_net_type == "none":
             latent = self.mlp_extractor(features)
             c_t = None
-        elif self.method == "vanilla_freeze":
-            c_t, h_new = self.concept_net(features, h_prev)   # [B, concept_dim], h_t or None
+        elif self.concept_net_type == "cbm":
+            c_t, h_new = self.concept_net(features, h_prev)
             latent = self.mlp_extractor(c_t)
-        elif self.method == "concept_actor_critic":
+        elif self.concept_net_type == "concept_ac":
             c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)
             latent = self.mlp_extractor(c_t)
         else:
-            raise ValueError(f"Unknown method: {self.method}")
+            raise ValueError(f"Unknown concept_net: {self.concept_net_type}")
 
         return latent, h_new, c_t, (V_c, concept_dists)
 
