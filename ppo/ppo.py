@@ -475,8 +475,14 @@ class PPO:
 
         if self.concept_net != "none" and self.freeze_concept:
             optimizer = self.policy.optimizer_exclude_concept
+            # Clip only the params being updated so large concept-net gradients
+            # (from the policy loss flowing through a coupled bottleneck) don't
+            # shrink the effective step size for the policy/value heads.
+            clip_params = [p for name, p in self.policy.named_parameters()
+                           if "concept_net" not in name]
         else:
             optimizer = self.policy.optimizer
+            clip_params = list(self.policy.parameters())
 
         pg_losses, vf_losses, ent_losses = [], [], []
 
@@ -503,16 +509,13 @@ class PPO:
 
                 vf_loss  = F.mse_loss(values, batch["returns"])
 
-                if entropy is None:
-                    ent_loss = -torch.mean(-log_prob)
-                else:
-                    ent_loss = -entropy.mean()
+                ent_loss = -entropy.mean() if entropy is not None else -(-log_prob).mean()
 
                 loss = pg_loss + self.vf_coef * vf_loss + self.ent_coef * ent_loss
 
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(clip_params, self.max_grad_norm)
                 optimizer.step()
 
                 pg_losses.append(pg_loss.item())
@@ -1014,12 +1017,9 @@ class PPO:
 
             obs_t = _obs_to_tensor(obs, self.device)
             with torch.no_grad():
-                if self.concept_net == "concept_ac":
-                    actions, h_new = self.policy.predict(obs_t, h_t)
-                    if h_new is not None:
-                        h_t = h_new
-                else:
-                    actions, _ = self.policy.predict(obs_t)
+                actions, h_new = self.policy.predict(obs_t, h_t)
+                if h_new is not None:
+                    h_t = h_new
 
             next_obs, _, terminated, truncated, infos = self.env.step(actions.cpu().numpy())
             dones = np.logical_or(terminated, truncated)
