@@ -61,7 +61,8 @@ def get_obs_shape(env):
     return obs_space.shape
 
 
-def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 4):
+def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: int = 4,
+                               reward_mode: str = "dense"):
     """
     Returns (vec_env, single_env, policy_kwargs_base).
     policy_kwargs_base contains obs_shape, n_actions, task_types, num_classes, concept_dim.
@@ -89,8 +90,8 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
         vec_env    = make_hidden_velocity_env(n_envs, seed)
         single_env = make_single_hidden_velocity_env(seed)
     elif env_name == "tmaze":
-        vec_env    = make_tmaze_env(n_envs, seed, n_stack=n_stack)
-        single_env = make_single_tmaze_env(seed, n_stack=n_stack)
+        vec_env    = make_tmaze_env(n_envs, seed, n_stack=n_stack, reward_mode=reward_mode)
+        single_env = make_single_tmaze_env(seed, n_stack=n_stack, reward_mode=reward_mode)
     else:
         raise ValueError(f"Unknown env: {env_name}")
 
@@ -159,6 +160,10 @@ def main() -> None:
                         help="Supervised anchor loss weight (concept_ac only)")
     parser.add_argument("--device",            type=str,   default="auto")
     parser.add_argument("--output_dir",        type=str,   default="/glade/derecho/scratch/adadelek/results")
+    parser.add_argument("--reward_mode",       type=str,   default="dense",
+                        choices=["dense", "sparse"],
+                        help="Reward shaping: 'dense' (step penalties + ±1 at junction) "
+                             "or 'sparse' (+1 correct at junction only)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -180,7 +185,7 @@ def main() -> None:
 
     # ---- Environment ----
     vec_env, single_env, policy_kwargs = make_env_and_policy_kwargs(
-        args.env, args.n_envs, args.seed, n_stack=n_stack
+        args.env, args.n_envs, args.seed, n_stack=n_stack, reward_mode=args.reward_mode
     )
     policy_kwargs["device"] = args.device if args.device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"

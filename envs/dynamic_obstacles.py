@@ -24,9 +24,12 @@ Static concepts: positions (visible from single frame).
 from collections import deque
 from typing import Optional
 
-import cv2
 import gymnasium as gym
 import numpy as np
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 try:
     from minigrid.core.constants import DIR_TO_VEC
@@ -52,6 +55,10 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
         grid_size: int = 8,
     ):
         super().__init__(env)
+        if cv2 is None:
+            raise ImportError(
+                "DynamicObstaclesEnvWrapper requires OpenCV (cv2). Install opencv-python in this environment."
+            )
         assert _MINIGRID_AVAILABLE, "minigrid package required for DynamicObstaclesEnvWrapper"
         self.ROWS = ROWS
         self.COLS = COLS
@@ -97,7 +104,15 @@ class DynamicObstaclesEnvWrapper(gym.Wrapper):
     # ------------------------------------------------------------------
 
     def get_concept(self) -> np.ndarray:
-        return self.current_concept.copy() if self.current_concept is not None else np.zeros(11, dtype=np.float32)
+        return self.current_concept.copy() if self.current_concept is not None else np.zeros(13, dtype=np.float32)
+
+    @property
+    def concept_reward_active(self) -> float:
+        """1.0 only when at least one obstacle moved this step.
+        Keeps the concept AC reward focused on temporal concept prediction
+        rather than trivial static concept lookup or 'stayed' predictions."""
+        v1, v2 = self._current_obstacle_velocities
+        return 1.0 if (v1 != (0, 0) or v2 != (0, 0)) else 0.0
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)

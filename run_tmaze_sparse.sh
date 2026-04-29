@@ -3,31 +3,19 @@
 #PBS -q casper
 #PBS -l select=1:ncpus=36:mem=128gb
 #PBS -l walltime=08:00:00
-#PBS -N run_tmaze_full
+#PBS -N run_tmaze_sparse
 #PBS -j oe
-#PBS -o /glade/derecho/scratch/adadelek/results/tmaze_full/run_tmaze_full_pbs.log
+#PBS -o /glade/derecho/scratch/adadelek/results/tmaze_sparse/run_tmaze_sparse_pbs.log
 
 cd /glade/u/home/adadelek/concept_critic_models
 
-# run_tmaze_full.sh — Architecture + technique sweep on TMaze.
+# run_tmaze_sparse.sh — Same 13-run sweep as run_tmaze_full.sh but with
+# reward_mode=sparse: only +1.0 at the junction for the correct choice,
+# 0.0 everywhere else (no step penalties, no premature penalty, no -1 for wrong).
 #
-# Goal: compare architectures and training techniques at maximum performance.
-# No label budget constraint — labels are always available from the environment.
-#
-# Supervision modes used:
-#   online  — ground truth from rollout buffer every iteration (max label signal)
-#   none    — pure AC reward signal only, no labels (concept_ac only)
-#
-# 1  none          (pure PPO baseline)
-# 4  cbm        × {gru, none} × {online}       × {frozen, coupled}
-# 8  concept_ac × {gru, none} × {online, none} × {frozen, coupled}
-# ── total: 13 runs
-#
-# Key comparisons:
-#   cbm vs concept_ac (same temporal, both online)    — does AC signal help?
-#   concept_ac online vs concept_ac none              — does label supervision help AC?
-#   gru vs none                                       — does temporal memory help?
-#   frozen vs coupled                                 — does e2e gradient flow help?
+# Purpose: test whether the concept AC reward provides useful shaping when
+# task reward is maximally sparse.  Hypothesis: concept_ac+GRU+online should
+# retain an advantage over CBM+GRU+online that was invisible under dense rewards.
 
 set -e
 
@@ -38,8 +26,8 @@ N_STEPS=16
 N_EPOCHS=10
 BATCH=256
 SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results/tmaze_full
-PLOTS_DIR=plots/tmaze_full
+RESULTS_DIR=/glade/derecho/scratch/adadelek/results/tmaze_sparse
+PLOTS_DIR=plots/tmaze_sparse
 VENV=/glade/derecho/scratch/adadelek/venv
 
 source $VENV/bin/activate
@@ -48,8 +36,8 @@ mkdir -p $RESULTS_DIR $PLOTS_DIR
 PIDS=()
 
 echo "========================================"
-echo "TMazeEnv architecture sweep (13 runs)"
-echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
+echo "TMazeEnv sparse-reward sweep (13 runs)"
+echo "env=$ENV  reward_mode=sparse  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
 # ---------------------------------------------------------------------------
@@ -57,7 +45,7 @@ echo "========================================"
 # ---------------------------------------------------------------------------
 python train.py --concept_net none \
     --num_labels 0 --query_num_times 0 \
-    --env $ENV --seed $SEED --total_timesteps $TS \
+    --env $ENV --reward_mode sparse --seed $SEED --total_timesteps $TS \
     --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
     --device cpu --output_dir $RESULTS_DIR \
     > $RESULTS_DIR/none_${ENV}_seed${SEED}.log 2>&1 &
@@ -77,7 +65,7 @@ for FREEZE_FLAG in "--freeze_concept" ""; do
         --concept_net cbm \
         --temporal $TEMPORAL --supervision online $FREEZE_FLAG \
         --num_labels 0 --query_num_times 0 \
-        --env $ENV --seed $SEED --total_timesteps $TS \
+        --env $ENV --reward_mode sparse --seed $SEED --total_timesteps $TS \
         --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
         --device cpu --output_dir $RESULTS_DIR \
         > $RESULTS_DIR/${TAG}.log 2>&1 &
@@ -100,8 +88,7 @@ for FREEZE_FLAG in "--freeze_concept" ""; do
     python train.py \
         --concept_net concept_ac \
         --temporal $TEMPORAL --supervision $SUPERVISION $FREEZE_FLAG \
-        --num_labels 0 --query_num_times 0 \
-        --env $ENV --seed $SEED --total_timesteps $TS \
+        --env $ENV --reward_mode sparse --seed $SEED --total_timesteps $TS \
         --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
         --device cpu --output_dir $RESULTS_DIR \
         > $RESULTS_DIR/${TAG}.log 2>&1 &

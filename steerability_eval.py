@@ -14,7 +14,7 @@ Metrics per model:
   reward_flipped       mean reward if the agent acted on the wrong concept
   correct_change_rate  fraction of episodes where action changed under correct override
   flip_change_rate     fraction of episodes where action changed under flipped override
-  steerability_score   (reward_correct - reward_baseline) normalised to [0,1]
+  steerability_score   normalized improvement score, clipped to [-1,1]
   causal_sensitivity   reward_baseline - reward_flipped
 
 Usage:
@@ -112,23 +112,22 @@ def load_policy(model_dir: str, concept_net: str, temporal: str,
 
 
 # ---------------------------------------------------------------------------
-# Reward inference from action + cue
+# Junction reward helper
 # ---------------------------------------------------------------------------
 
-def infer_reward(action: int, cue: int, n_steps: int) -> float:
+def junction_reward(action: int, cue: int) -> float:
     """
-    TMaze reward at junction:
-      +1.0 if action matches cue,  -1.0 otherwise
-      plus -0.01 per step taken (time penalty)
+    Exact one-step TMaze reward when already at junction:
+      base step penalty -0.01
+      +1.0 if action matches cue, -1.0 otherwise
     """
-    time_penalty = -0.01 * n_steps
     if action == 1:          # choose LEFT
         outcome = 1.0 if cue == 0 else -1.0
     elif action == 2:        # choose RIGHT
         outcome = 1.0 if cue == 1 else -1.0
-    else:                    # forward at junction = treated as wrong
-        outcome = 1.0 if cue == 0 else -1.0
-    return outcome + time_penalty
+    else:                    # forward at junction — always wrong
+        outcome = -1.0
+    return -0.01 + outcome
 
 
 # ---------------------------------------------------------------------------
@@ -154,19 +153,16 @@ def evaluate_steerability(policy: ActorCriticPolicy, concept_net: str,
     rewards_flipped = []
     correct_changed = []
     flip_changed    = []
-    junction_actions_base = []
-
     for ep in range(n_episodes):
         obs, info = env.reset()
         h = None
         done = False
-        n_steps = 0
+        ep_prefix_reward = 0.0
         junction_reached = False
         ep_cue = int(env.env._cue) if hasattr(env, "env") else int(env._cue)
 
         while not done:
             obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            n_steps += 1
 
             # Detect junction from observation (at_junction is obs[3])
             at_junction = obs[3] > 0.5
@@ -194,32 +190,32 @@ def evaluate_steerability(policy: ActorCriticPolicy, concept_net: str,
                 a_cor = int(action_cor.item())
                 a_fli = int(action_fli.item())
 
-                r_base    = infer_reward(a_base, ep_cue, n_steps)
-                r_correct = infer_reward(a_cor,  ep_cue, n_steps)
-                r_flipped = infer_reward(a_fli,  ep_cue, n_steps)
+                # Counterfactual totals share the same realised prefix reward.
+                r_base    = ep_prefix_reward + junction_reward(a_base, ep_cue)
+                r_correct = ep_prefix_reward + junction_reward(a_cor,  ep_cue)
+                r_flipped = ep_prefix_reward + junction_reward(a_fli,  ep_cue)
 
                 rewards_base.append(r_base)
                 rewards_correct.append(r_correct)
                 rewards_flipped.append(r_flipped)
                 correct_changed.append(int(a_cor != a_base))
                 flip_changed.append(int(a_fli != a_base))
-                junction_actions_base.append(a_base)
 
                 # Step the env with baseline action to close the episode
-                obs, _, terminated, truncated, _ = env.step(a_base)
+                obs, r_step, terminated, truncated, _ = env.step(a_base)
+                ep_prefix_reward += float(r_step)
                 done = terminated or truncated
                 h = h_base
 
             else:
                 # Normal step (corridor walk)
                 action, h = policy.predict(obs_t, h, deterministic=True)
-                obs, _, terminated, truncated, _ = env.step(int(action.item()))
+                obs, r_step, terminated, truncated, _ = env.step(int(action.item()))
+                ep_prefix_reward += float(r_step)
                 done = terminated or truncated
 
-        if concept_net == "none" or not junction_reached:
-            # For none model we just collect actual episode reward
-            # Re-run cleanly
-            pass
+        if concept_net != "none" and not junction_reached:
+            raise RuntimeError("Junction was not reached for a concept model episode; steerability metrics are invalid.")
 
     env.close()
 

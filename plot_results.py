@@ -38,9 +38,8 @@ METHOD_LABELS = {
 }
 
 TEMPORAL_LABELS = {
-    "gru":     "GRU",
-    "stacked": "Frame-stacked",
-    "none":    "No memory",
+    "gru":  "GRU",
+    "none": "No memory",
 }
 
 SUPERVISION_LABELS = {
@@ -288,7 +287,7 @@ def plot_heatmap(runs: Dict, out_dir: str, env: str) -> None:
     temporal × freeze heatmap of final eval reward.
     Shows 2-factor interactions cleanly.
     """
-    temporals = ["gru", "stacked", "none"]
+    temporals = ["gru", "none"]
     freezes   = ["frozen", "coupled"]
 
     concept_nets = [cn for cn in ["cbm", "concept_ac"] if cn in runs]
@@ -299,7 +298,6 @@ def plot_heatmap(runs: Dict, out_dir: str, env: str) -> None:
     panels = []
     for cn in concept_nets:
         supervisions = sorted(runs[cn].get("gru", {}).keys() or
-                              runs[cn].get("stacked", {}).keys() or
                               runs[cn].get("none", {}).keys())
         # gather from all temporals
         all_sups = set()
@@ -412,8 +410,8 @@ def plot_focused_curves(runs: Dict, out_dir: str, env: str, window: int = 30) ->
     # ---- Q1: temporal encoding ----
     ax = axes[0]
     plotted = False
-    colors = {"gru": "#2ca02c", "stacked": "#ff7f0e", "none": "#d62728"}
-    for temp in ["gru", "stacked", "none"]:
+    colors = {"gru": "#2ca02c", "none": "#d62728"}
+    for temp in ["gru", "none"]:
         try:
             sd = runs["concept_ac"][temp]["online"]["frozen"]
             plotted |= _plot_curve(ax, sd, TEMPORAL_LABELS[temp], colors[temp])
@@ -486,7 +484,7 @@ def plot_acc_vs_reward_scatter(runs: Dict, out_dir: str, env: str) -> None:
     Each point = one run. Shows whether concept quality correlates with reward.
     """
     colors = {"cbm": "#ff7f0e", "concept_ac": "#2ca02c"}
-    markers = {"gru": "o", "stacked": "s", "none": "^"}
+    markers = {"gru": "o", "none": "^"}
 
     fig, ax = plt.subplots(figsize=(8, 6))
     plotted = False
@@ -660,9 +658,9 @@ def plot_concept_acc_ablation(runs: Dict, out_dir: str, env: str, window: int = 
 
     # ---- Q1: temporal encoding ----
     ax = axes[0]
-    colors = {"gru": "#2ca02c", "stacked": "#ff7f0e", "none": "#d62728"}
+    colors = {"gru": "#2ca02c", "none": "#d62728"}
     plotted = False
-    for temp in ["gru", "stacked", "none"]:
+    for temp in ["gru", "none"]:
         try:
             sd = runs["concept_ac"][temp]["online"]["frozen"]
             plotted |= _plot_acc_curve(ax, sd, TEMPORAL_LABELS[temp], colors[temp])
@@ -722,7 +720,7 @@ def plot_heatmap_concept_acc(runs: Dict, out_dir: str, env: str) -> None:
     """
     Mirrors plot_heatmap but colored by final concept accuracy instead of reward.
     """
-    temporals = ["gru", "stacked", "none"]
+    temporals = ["gru", "none"]
     freezes   = ["frozen", "coupled"]
 
     concept_nets = [cn for cn in ["cbm", "concept_ac"] if cn in runs]

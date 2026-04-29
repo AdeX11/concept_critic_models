@@ -1,45 +1,35 @@
 #!/bin/bash
 #PBS -A NAML0001
 #PBS -q casper
-#PBS -l select=1:ncpus=36:mem=128gb
-#PBS -l walltime=08:00:00
-#PBS -N run_tmaze_full
+#PBS -l select=1:ncpus=64:ngpus=1:mem=256gb
+#PBS -l walltime=12:00:00
+#PBS -N run_dynamic_obstacles_full
 #PBS -j oe
-#PBS -o /glade/derecho/scratch/adadelek/results/tmaze_full/run_tmaze_full_pbs.log
+#PBS -o /glade/derecho/scratch/adadelek/results/dynamic_obstacles_full/run_dynamic_obstacles_full_pbs.log
 
 cd /glade/u/home/adadelek/concept_critic_models
 
-# run_tmaze_full.sh — Architecture + technique sweep on TMaze.
+# run_dynamic_obstacles_full.sh — Architecture + technique sweep on DynamicObstacles.
 #
-# Goal: compare architectures and training techniques at maximum performance.
-# No label budget constraint — labels are always available from the environment.
-#
-# Supervision modes used:
-#   online  — ground truth from rollout buffer every iteration (max label signal)
-#   none    — pure AC reward signal only, no labels (concept_ac only)
+# Key question: does the concept AC reward provide an advantage over CBM
+# when concept reward fires densely (every step, all 13 concepts)?
 #
 # 1  none          (pure PPO baseline)
 # 4  cbm        × {gru, none} × {online}       × {frozen, coupled}
 # 8  concept_ac × {gru, none} × {online, none} × {frozen, coupled}
 # ── total: 13 runs
-#
-# Key comparisons:
-#   cbm vs concept_ac (same temporal, both online)    — does AC signal help?
-#   concept_ac online vs concept_ac none              — does label supervision help AC?
-#   gru vs none                                       — does temporal memory help?
-#   frozen vs coupled                                 — does e2e gradient flow help?
 
 set -e
 
-ENV=tmaze
-TS=2000000
-N_ENVS=8
-N_STEPS=16
+ENV=dynamic_obstacles
+TS=5000000
+N_ENVS=4
+N_STEPS=512
 N_EPOCHS=10
 BATCH=256
 SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results/tmaze_full
-PLOTS_DIR=plots/tmaze_full
+RESULTS_DIR=/glade/derecho/scratch/adadelek/results/dynamic_obstacles_full
+PLOTS_DIR=plots/dynamic_obstacles_full
 VENV=/glade/derecho/scratch/adadelek/venv
 
 source $VENV/bin/activate
@@ -48,7 +38,7 @@ mkdir -p $RESULTS_DIR $PLOTS_DIR
 PIDS=()
 
 echo "========================================"
-echo "TMazeEnv architecture sweep (13 runs)"
+echo "DynamicObstacles architecture sweep (13 runs)"
 echo "env=$ENV  timesteps=$TS  n_envs=$N_ENVS  seed=$SEED"
 echo "========================================"
 
@@ -59,7 +49,7 @@ python train.py --concept_net none \
     --num_labels 0 --query_num_times 0 \
     --env $ENV --seed $SEED --total_timesteps $TS \
     --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
-    --device cpu --output_dir $RESULTS_DIR \
+    --device auto --output_dir $RESULTS_DIR \
     > $RESULTS_DIR/none_${ENV}_seed${SEED}.log 2>&1 &
 PIDS+=($!)
 echo "[PID ${PIDS[-1]}] none"
@@ -79,7 +69,7 @@ for FREEZE_FLAG in "--freeze_concept" ""; do
         --num_labels 0 --query_num_times 0 \
         --env $ENV --seed $SEED --total_timesteps $TS \
         --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
-        --device cpu --output_dir $RESULTS_DIR \
+        --device auto --output_dir $RESULTS_DIR \
         > $RESULTS_DIR/${TAG}.log 2>&1 &
     PIDS+=($!)
     echo "[PID ${PIDS[-1]}] cbm  $TEMPORAL  online  $FREEZE_STR"
@@ -100,10 +90,9 @@ for FREEZE_FLAG in "--freeze_concept" ""; do
     python train.py \
         --concept_net concept_ac \
         --temporal $TEMPORAL --supervision $SUPERVISION $FREEZE_FLAG \
-        --num_labels 0 --query_num_times 0 \
         --env $ENV --seed $SEED --total_timesteps $TS \
         --n_envs $N_ENVS --n_steps $N_STEPS --n_epochs $N_EPOCHS --batch_size $BATCH \
-        --device cpu --output_dir $RESULTS_DIR \
+        --device auto --output_dir $RESULTS_DIR \
         > $RESULTS_DIR/${TAG}.log 2>&1 &
     PIDS+=($!)
     echo "[PID ${PIDS[-1]}] concept_ac  $TEMPORAL  $SUPERVISION  $FREEZE_STR"

@@ -102,7 +102,14 @@ class CBMNetwork(nn.Module):
         for head, task_type in zip(self.heads, self.task_types):
             out = head(head_input)
             if task_type == "classification":
-                out = out.argmax(dim=1).float()
+                k = out.size(1)
+                hard = out.argmax(dim=1)
+                soft = F.softmax(out, dim=1)
+                one_hot = F.one_hot(hard, k).float()
+                # Straight-through estimator: argmax forward, softmax backward
+                c = (one_hot - soft).detach() + soft
+                c = (c * torch.arange(k, device=x.device).float()).sum(dim=1)
+                out = c
             else:
                 out = out.squeeze(dim=1)
             outputs.append(out)

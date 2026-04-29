@@ -22,6 +22,11 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+# Ensure matplotlib/font caches use writable paths on shared systems.
+_cache_root = os.path.join(os.getcwd(), ".cache")
+os.makedirs(_cache_root, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(_cache_root, "matplotlib"))
+os.environ.setdefault("XDG_CACHE_HOME", _cache_root)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -201,12 +206,9 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
     model.policy.set_training_mode(False)
     obs, _ = single_env.reset()
 
-    # Hidden state: only needed for GRU temporal encoding
+    # Hidden state: needed for any GRU temporal encoding (concept_ac or cbm)
     from ppo.networks import ConceptActorCritic
-    use_gru = (
-        getattr(model, "temporal_encoding", "none") == "gru"
-        and model.concept_net == "concept_ac"
-    )
+    use_gru = getattr(model, "temporal_encoding", "none") == "gru"
     h_t = torch.zeros(1, ConceptActorCritic.HIDDEN_DIM, device=model.device) if use_gru else None
 
     for _ in range(200):
@@ -221,21 +223,17 @@ def _evaluate_concepts(model: PPO, single_env) -> Dict[str, float]:
 
         truth = single_env.get_concept()
 
-        # Single forward pass: extract concepts and action together (avoids double GRU advance)
         with torch.no_grad():
             features = model.policy.extract_features(obs_t)
             if model.concept_net == "concept_ac":
                 c_t, h_new, _, _ = model.policy.concept_net(features, h_t)
-                latent = model.policy.mlp_extractor(c_t)
-                action_logits = model.policy.action_net(latent)
-                action = action_logits.argmax(dim=1)
-                if h_new is not None:
-                    h_t = h_new
             else:
-                c_t, _ = model.policy.concept_net(features, None)
-                latent = model.policy.mlp_extractor(c_t)
-                action_logits = model.policy.action_net(latent)
-                action = action_logits.argmax(dim=1)
+                c_t, h_new = model.policy.concept_net(features, h_t)
+            if h_new is not None:
+                h_t = h_new
+            latent = model.policy.mlp_extractor(c_t)
+            action_logits = model.policy.action_net(latent)
+            action = action_logits.argmax(dim=1)
 
         if c_t is not None:
             c_np = c_t.cpu().numpy().flatten()

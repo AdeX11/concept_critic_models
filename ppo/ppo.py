@@ -358,9 +358,10 @@ class PPO:
             # Collect ground-truth concepts for CURRENT observation (before stepping)
             concepts = self._get_current_concepts()
 
-            # Collect concept_reward_active mask from env (e.g. TMaze fires only
-            # at the junction).  Used both for concept AC reward and for
-            # filtering the concept accuracy evaluation metric.
+            # concept_eval_mask: used only for filtering the concept accuracy
+            # evaluation metric (e.g. junction-only in TMaze).
+            # concept_reward fires at ALL timesteps — dense signal so the GRU
+            # receives gradient at cue-phase, blank-corridor, and junction steps.
             try:
                 eval_mask = np.array(
                     self.env.get_attr("concept_reward_active"), dtype=np.float32
@@ -372,7 +373,7 @@ class PPO:
             if self.concept_net == "concept_ac" and c_t is not None:
                 concept_reward = self._compute_concept_reward(
                     c_t.cpu().numpy(), concepts
-                ) * eval_mask
+                )
 
             # Step environment
             np_actions = actions.cpu().numpy()
