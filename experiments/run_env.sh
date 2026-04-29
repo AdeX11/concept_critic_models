@@ -8,7 +8,7 @@ export PYGAME_HIDE_SUPPORT_PROMPT=1
 # --- Arguments ---
 # Usage: bash run_env.sh <env_name> [timesteps] [seed]
 ENV="${1:-cartpole}"
-TS="${2:-20000}"
+TS="${2:-500}"
 SEED="${3:-42}"
 
 # --- Hyperparams ---

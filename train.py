@@ -2,17 +2,16 @@
 train.py — Unified training entry point.
 
 Usage:
-  python train.py --concept_net none       --env cartpole          --seed 42
-  python train.py --concept_net cbm        --env dynamic_obstacles --seed 42 --freeze_concept
-  python train.py --concept_net concept_ac --env lunar_lander      --seed 42 --temporal gru
+  python train.py --method no_concept           --env cartpole           --seed 42
+  python train.py --method vanilla_freeze        --env dynamic_obstacles  --seed 42 --training_mode two_phase
+  python train.py --method concept_actor_critic  --env lunar_lander       --seed 42 --temporal_encoding gru --training_mode joint
 
 Parameters:
-  --concept_net   : none | cbm | concept_ac   (what concept network architecture)
-  --temporal      : none | stacked | gru       (temporal encoding)
-  --supervision   : queried | online | none    (when supervised anchor fires)
-  --freeze_concept: flag — freeze concept net during policy gradient update
+  --method            : no_concept | vanilla_freeze | concept_actor_critic
+  --training_mode     : two_phase | end_to_end | joint
+  --temporal_encoding : none | stacked | gru
 
-Output: results/<concept_net>_<temporal>_<supervision>_<frozen|coupled>_<env>_seed<seed>/
+Output: results/<method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>/
   - rewards.npy      — episode reward history
   - concept_acc.npz  — concept accuracy log (if applicable)
   - model.pt         — saved policy state_dict
@@ -74,20 +73,17 @@ def main() -> None:
                         choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
     parser.add_argument("--benchmark", default=None, choices=list_benchmark_ids())
     parser.add_argument("--env", default=None, choices=list_env_names())
+    parser.add_argument("--training_mode", type=str, default="two_phase",
+                        choices=["two_phase", "end_to_end", "joint"],
+                        help="Training mode: 'two_phase' (freeze concept net during PPO update), "
+                             "'end_to_end' (policy gradient flows through concept net), "
+                             "'joint' (combined loss)")
     parser.add_argument("--temporal_encoding", type=str, default="none",
                         choices=["gru", "stacked", "none"],
                         help="Temporal encoding: "
                              "'gru' (GRUCell hidden state), "
                              "'stacked' (env-level frame stack), "
                              "'none' (single-frame, no memory)")
-    parser.add_argument("--supervision", type=str, default="queried",
-                        choices=["queried", "online", "none"],
-                        help="When supervised anchor fires: "
-                             "'queried' (only at explicit label query times), "
-                             "'online' (every PPO iteration from rollout buffer)")
-    parser.add_argument("--freeze_concept", action="store_true",
-                        help="Freeze concept net during policy gradient update "
-                             "(concept net updated only via supervision, not policy loss)")
     parser.add_argument("--seed",              type=int,   default=42)
     parser.add_argument("--total_timesteps",   type=int,   default=None)
     parser.add_argument("--num_labels",        type=int,   default=None,
@@ -128,6 +124,16 @@ def main() -> None:
 
     set_seed(args.seed)
 
+    # Map old method names → PPO concept_net
+    _method_to_concept_net = {
+        "no_concept": "none",
+        "vanilla_freeze": "cbm",
+        "concept_actor_critic": "concept_ac",
+    }
+    concept_net = _method_to_concept_net[args.method]
+    freeze_concept = (args.training_mode == "two_phase")
+    supervision = "online"  # always on
+
     out_dir = os.path.join(
         args.output_dir,
         f"{args.method}_{args.training_mode}_{args.temporal_encoding}_{benchmark_id}_seed{args.seed}"
@@ -167,11 +173,11 @@ def main() -> None:
     policy_kwargs["device"] = args.device if args.device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
     )
-    policy_kwargs["temporal_encoding"] = args.temporal
+    policy_kwargs["temporal_encoding"] = args.temporal_encoding
 
     # ---- PPO ----
     model = PPO(
-        concept_net    = args.concept_net,
+        concept_net    = concept_net,
         env            = vec_env,
         policy_kwargs  = policy_kwargs,
         n_steps        = args.n_steps,
@@ -186,8 +192,8 @@ def main() -> None:
         learning_rate  = args.learning_rate,
         lambda_v       = args.lambda_v,
         lambda_s       = args.lambda_s,
-        freeze_concept = args.freeze_concept,
-        supervision    = args.supervision,
+        freeze_concept = freeze_concept,
+        supervision    = supervision,
         normalize_advantage = True,
         seed           = args.seed,
         device         = args.device,
@@ -205,7 +211,7 @@ def main() -> None:
 
     model.learn(
         total_timesteps       = args.total_timesteps,
-        query_num_times       = args.query_num_times if args.concept_net != "none" else 0,
+        query_num_times       = args.query_num_times if concept_net != "none" else 0,
         query_labels_per_time = labels_per_query,
         eval_every_timesteps = args.eval_every_timesteps,
         eval_n_episodes      = args.eval_episodes,

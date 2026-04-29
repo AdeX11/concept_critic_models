@@ -75,10 +75,16 @@ def predict_step(
 
 
 def build_policy(args, single_env, device: torch.device) -> ActorCriticPolicy:
+    _method_to_concept_net = {
+        "no_concept": "none",
+        "vanilla_freeze": "cbm",
+        "concept_actor_critic": "concept_ac",
+    }
+    concept_net = _method_to_concept_net.get(args.method, "none")
     policy = ActorCriticPolicy(
         obs_shape=get_obs_shape(single_env),
         n_actions=single_env.action_space.n,
-        method=args.method,
+        concept_net=concept_net,
         task_types=single_env.task_types,
         num_classes=single_env.num_classes,
         concept_dim=len(single_env.task_types),

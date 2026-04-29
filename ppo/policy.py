@@ -121,6 +121,9 @@ class ActorCriticPolicy(nn.Module):
         self.obs_is_dict = isinstance(obs_shape, dict)
         self.n_actions = n_actions
         self.concept_net_type = concept_net
+        # User-facing method name (for downstream compatibility: replay, compare, interpretability)
+        _method_map = {"none": "no_concept", "cbm": "vanilla_freeze", "concept_ac": "concept_actor_critic"}
+        self.method = _method_map.get(concept_net, "no_concept")
         self.task_types = task_types
         self.num_classes = num_classes
         self.concept_dim = concept_dim

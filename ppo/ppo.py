@@ -93,10 +93,20 @@ class PPO:
         )
 
         self.concept_net = concept_net
+        # User-facing method name (for checkpoint and downstream compat: replay, compare)
+        _method_map = {"none": "no_concept", "cbm": "vanilla_freeze", "concept_ac": "concept_actor_critic"}
+        self.method = _method_map.get(concept_net, "no_concept")
         self.freeze_concept = freeze_concept
         self.supervision = supervision
         self.env = env
         self.n_envs = env.num_envs
+        # Detect whether the env supports concept_reward_active (avoid crashing
+        # AsyncVectorEnv workers on envs that don't have the property, like
+        # Cartpole or DynamicObstacles).  We probe the single-threaded eval_env.
+        self._has_concept_reward_active = (
+            hasattr(eval_env, "concept_reward_active")
+            if eval_env is not None else False
+        )
         self.n_steps = n_steps
         self.n_epochs = n_epochs
         self.batch_size = batch_size
@@ -505,14 +515,15 @@ class PPO:
             concepts = self._get_current_concepts()
 
             # concept_eval_mask: used only for filtering the concept accuracy
-            # evaluation metric (e.g. junction-only in TMaze).
-            # concept_reward fires at ALL timesteps — dense signal so the GRU
-            # receives gradient at cue-phase, blank-corridor, and junction steps.
-            try:
+            # evaluation metric (e.g. junction-only in TMaze).  Consulted at
+            # init time via _has_concept_reward_active so we never send
+            # get_attr into AsyncVectorEnv workers that lack the property
+            # (avoids silent subprocess crashes on envs like Cartpole).
+            if self._has_concept_reward_active:
                 eval_mask = np.array(
                     self.env.get_attr("concept_reward_active"), dtype=np.float32
                 )
-            except Exception:
+            else:
                 eval_mask = np.ones(self.n_envs, dtype=np.float32)
 
             concept_reward = None
@@ -1344,7 +1355,7 @@ class PPO:
             obs, _ = self.eval_env.reset(seed=self.seed + ep)
             h_t = (
                 torch.zeros(1, self.hidden_dim, device=self.device)
-                if self.method == "concept_actor_critic" and self.temporal_encoding == "gru"
+                if self.concept_net == "concept_ac" and self.temporal_encoding == "gru"
                 else None
             )
             ep_reward = 0.0
@@ -1360,7 +1371,7 @@ class PPO:
                 else:
                     obs_t = torch.as_tensor(np.expand_dims(obs, 0), dtype=torch.float32).to(self.device)
                 with torch.no_grad():
-                    if self.method == "concept_actor_critic":
+                    if self.concept_net == "concept_ac":
                         action, h_new = self.policy.predict(obs_t, h_t, deterministic)
                         if h_new is not None:
                             h_t = h_new

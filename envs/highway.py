@@ -376,7 +376,7 @@ if __name__ == "__main__":
     print(f"Concept names: {wrapped.concept_names}")
     print(f"Temporal concepts: {wrapped.temporal_concepts}")
 
-    for step_idx in range(250):
+    for step_idx in range(150):
         action = wrapped.action_space.sample()
         obs, reward, done, truncated, info = wrapped.step(action)
 
