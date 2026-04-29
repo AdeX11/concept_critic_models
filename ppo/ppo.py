@@ -15,11 +15,12 @@ training_mode controls how concept network parameters interact with policy train
 Label collection is simple random sampling (no active learning).
 """
 
+import time
+from typing import List, Optional, Tuple, Union, Dict
 import os
 import random
-import time
 from collections import deque
-from typing import Dict, List, Optional, Tuple, Union
+from runtime_utils import flatten_terminal_info
 
 import numpy as np
 import torch
@@ -28,7 +29,6 @@ import torch.nn.functional as F
 from .buffer import RolloutBuffer
 from .policy import ActorCriticPolicy
 from .networks import ConceptActorCritic
-from runtime_utils import flatten_terminal_info
 
 
 def _obs_to_tensor(obs, device: torch.device):
@@ -80,7 +80,7 @@ class PPO:
         verbose: int = 1,
         eval_env=None,
         writer=None,
-        benchmark_spec=None,
+        benchmark_spec=None
     ):
         assert method in ("no_concept", "vanilla_freeze", "concept_actor_critic"), (
             f"Unknown method: {method}"
@@ -213,6 +213,7 @@ class PPO:
         if checkpoint_every_timesteps > 0 and self._next_checkpoint_at is None:
             self._next_checkpoint_at = max(checkpoint_every_timesteps, self.num_timesteps + checkpoint_every_timesteps)
 
+
         while self.num_timesteps < total_timesteps:
             # ---- Query concept labels ----
             if (
@@ -265,9 +266,7 @@ class PPO:
                 if acc:
                     self.concept_acc_log.append((self.num_timesteps, acc))
                     # Also compute raw MSE per concept for logging
-                    # Skip for GRU: random minibatch batches use wrong h_prev, producing misleading values
-                    if self.temporal_encoding != "gru":
-                        concept_loss_log = self._compute_concept_mse_from_buffer()
+                    concept_loss_log = self._compute_concept_mse_from_buffer()
 
             # ---- Logging ----
             if self.verbose and len(self.episode_reward_history) > 0:
@@ -419,6 +418,8 @@ class PPO:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.checkpoint_state(run_metadata=run_metadata), path)
 
+        return self
+
     # ==================================================================
     # collect_rollouts
     # ==================================================================
@@ -450,16 +451,8 @@ class PPO:
                     # Save h_PREV (pre-GRU) for buffer storage — must be before concept_net call
                     h_prev_for_buffer = h_t.clone()
                     features = self.policy.extract_features(obs_tensor)
-                    c_t, h_new, concept_dists, _ = self.policy.concept_net(
+                    c_t, h_new, concept_dists, V_c = self.policy.concept_net(
                         features, h_t
-                    )
-                    # Sample concept actions (needed for log-prob and V_c computation)
-                    concept_actions_sampled = self.policy.concept_net.sample_concept_actions(
-                        concept_dists
-                    )
-                    # Compute action-conditional concept value V_c for GAE
-                    _, _, _, V_c = self.policy.concept_net(
-                        features, h_t, actions=concept_actions_sampled
                     )
                     latent = self.policy.mlp_extractor(c_t)
                     action_logits = self.policy.action_net(latent)
@@ -468,9 +461,8 @@ class PPO:
                     log_probs = dist.log_prob(actions)
                     values    = self.policy.value_net(latent).flatten()
                     concept_log_prob = (
-                        self.policy.concept_net.concept_log_probs(
-                            concept_dists, concept_actions_sampled
-                        ).cpu().numpy()
+                        self.policy.concept_net.concept_log_probs(concept_dists, c_t)
+                        .cpu().numpy()
                     )
                     concept_value = V_c
                     if h_new is not None:
@@ -515,9 +507,7 @@ class PPO:
                 eval_mask = np.ones(self.n_envs, dtype=np.float32)
 
             concept_reward = None
-            concept_action_np = None
-            if self.method == "concept_actor_critic" and concept_actions_sampled is not None:
-                concept_action_np = concept_actions_sampled.cpu().numpy()
+            if self.method == "concept_actor_critic" and c_t is not None:
                 concept_reward = self._compute_concept_reward(
                     c_t.cpu().numpy(), concepts
                 ) * eval_mask
@@ -547,10 +537,7 @@ class PPO:
                 log_prob=log_probs,
                 hidden_state=(
                     h_prev_for_buffer.cpu().numpy()
-                    if (
-                        self.method == "concept_actor_critic"
-                        and self.temporal_encoding == "gru"
-                    ) else None
+                    if self.temporal_encoding == "gru" else None
                 ),
                 concept_value=concept_value,
                 concept_log_prob=concept_log_prob,
@@ -582,12 +569,10 @@ class PPO:
                 ).unsqueeze(1)
                 h_t_final = h_t * (1.0 - reset_mask)
                 features = self.policy.extract_features(obs_tensor)
-                # Forward without actions to get c_t and h_last for policy/value heads.
-                c_t, h_last, _, _ = self.policy.concept_net(features, h_t_final)
+                c_t, _, _, V_c_last = self.policy.concept_net(features, h_t_final)
                 latent = self.policy.mlp_extractor(c_t)
                 last_values = self.policy.value_net(latent).flatten()
-                # Bootstrap concept values at episode end (no stored actions for final state)
-                last_concept_values = torch.zeros(self.n_envs, device=self.device)
+                last_concept_values = V_c_last.flatten()
             elif self.method == "vanilla_freeze" and self.temporal_encoding == "gru":
                 reset_mask = torch.as_tensor(
                     episode_starts, dtype=torch.float32, device=self.device
@@ -713,21 +698,13 @@ class PPO:
 
         actor_losses, critic_losses, ent_losses = [], [], []
 
-        for _ in range(self.n_epochs):
+        for _ in range(self.concept_ac_epochs):
             for batch in self.rollout_buffer.get(self.batch_size):
                 obs    = batch["observations"]
                 h_prev = batch["hidden_states"]
 
                 features = self.policy.extract_features(obs)
-                # Fix #1: pass stored actions so concept_net computes Q_c(h_t, a_t)
-                # in one forward pass.  batch["actions"] is the action taken at this
-                # timestep, stored by collect_rollouts — the same action used when
-                # concept_value was computed during rollout, ensuring the Bellman
-                # target concept_returns was computed under the same (s, a) pair.
-                stored_actions = batch["actions"].long().flatten()
-                c_pred, _, concept_dists, V_c = concept_net(
-                    features, h_prev, actions=stored_actions
-                )
+                c_pred, _, concept_dists, V_c = concept_net(features, h_prev)
 
                 # ---- Concept actor loss (PPO-clipped) ----
                 c_adv = batch["concept_advantages"]
@@ -735,13 +712,7 @@ class PPO:
                     c_adv = (c_adv - c_adv.mean()) / (c_adv.std() + 1e-8)
 
                 old_clp = batch["concept_log_probs"]
-                # Evaluate new log-prob at the STORED sampled concept actions,
-                # NOT at the current argmax c_pred.  This ensures old_clp and
-                # new_clp refer to the same action, making the importance ratio
-                # π_new(a_stored) / π_old(a_stored) valid for PPO clipping.
-                new_clp = concept_net.concept_log_probs(
-                    concept_dists, batch["concept_actions"]
-                )
+                new_clp = concept_net.concept_log_probs(concept_dists, c_pred)
                 ratio   = torch.exp(new_clp - old_clp)
 
                 ac_loss1 = c_adv * ratio
@@ -1147,23 +1118,6 @@ class PPO:
         c_pred_np, c_true_np, _ = self._gather_concept_preds_from_buffer()
         if c_pred_np is None or len(c_pred_np) == 0:
             return {}
-        self.policy.set_training_mode(False)
-        with torch.no_grad():
-            batch = next(iter(self.rollout_buffer.get(min(512, self.rollout_buffer.buffer_size))))
-            obs    = batch["observations"]
-            c_true = batch["concepts"]
-            features = self.policy.extract_features(obs)
-            if self.method == "vanilla_freeze":
-                c_pred = self.policy.concept_net(features)
-            else:
-                h = batch.get("hidden_states")
-                c_pred, _, _, _ = self.policy.concept_net(features, h)
-                # Decode one-hot → [B, n_concepts] for logging/eval.
-                if hasattr(self.policy.concept_net, 'decode_concept_vector'):
-                    c_pred = self.policy.concept_net.decode_concept_vector(c_pred)
-            c_pred_np = c_pred.cpu().numpy()
-            c_true_np = c_true.cpu().numpy()
-        self.policy.set_training_mode(True)
         mse = {}
         for i, (name, tt) in enumerate(zip(self.concept_names, self.policy.task_types)):
             if tt == "regression":
@@ -1312,6 +1266,10 @@ class PPO:
             pass
 
         return concepts
+
+    # ==================================================================
+    # evaluation helpers
+    # ==================================================================
 
     # ==================================================================
     # evaluation helpers

@@ -50,7 +50,14 @@ class MountainCarConceptEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self.current_concept = np.array([obs[1]], dtype=np.float32)
+
+        # self.current_concept = np.array([obs[1]], dtype=np.float32)
+        # Inside MountainCarConceptEnv.step
+        velocity = obs[1]
+        # Standard Mountain Car velocity limits are [-0.07, 0.07]
+        norm_velocity = velocity / 0.07 
+        self.current_concept = np.array([norm_velocity], dtype=np.float32)
+        
         info["concept"] = self.current_concept.copy()
         return np.array([obs[0]], dtype=np.float32), info
 

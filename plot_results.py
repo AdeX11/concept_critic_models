@@ -517,11 +517,12 @@ def main() -> None:
         description="Load completed train.py runs and produce comparison plots."
     )
     parser.add_argument("--env", required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander",
+                        choices=["cartpole", "dynamic_obstacles", "highway",
+                                 "highway_state", "lunar_lander",
                                  "lunar_lander_state", "lunar_lander_pos_only",
                                  "mountain_car", "hidden_velocity", "tmaze"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
-    parser.add_argument("--results_dir",  type=str, default="/glade/derecho/scratch/adadelek/results",
+    parser.add_argument("--results_dir",  type=str, default="/results",
                         help="Directory containing completed run subdirectories")
     parser.add_argument("--output_dir",   type=str, default="plots",
                         help="Where to save plots and summary (kept local)")

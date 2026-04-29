@@ -152,24 +152,13 @@ class ActorCriticPolicy(nn.Module):
                 features_dim, task_types, num_classes,
                 temporal_encoding=temporal_encoding,
             )
-            # vanilla_freeze outputs scalar class indices [B, n_concepts];
-            # the policy MLP receives n_concepts floats.
             mlp_input_dim = concept_dim
         elif method == "concept_actor_critic":
-            # Fix #1: pass n_actions so the concept critic can be action-conditional
-            #         Q_c(h_t, a_t) instead of passive V_c(h_t).
-            # Fix #2: mlp_input_dim is now concept_net.policy_dim (sum of K_i for
-            #         classification + 1 per regression), NOT concept_dim (= n_concepts).
-            #         This matches the one-hot policy vector returned by forward().
             self.concept_net = ConceptActorCritic(
                 features_dim, task_types, num_classes,
-                n_actions=n_actions,
                 temporal_encoding=temporal_encoding,
             )
-            # policy_dim > concept_dim for any env with classification concepts
-            # (e.g. DynamicObstacles: 70 vs 13).  The MLP receives a richer, correctly
-            # structured representation with no false ordinality.
-            mlp_input_dim = self.concept_net.policy_dim
+            mlp_input_dim = self.concept_dim
         else:
             # no_concept
             mlp_input_dim = features_dim
@@ -307,30 +296,16 @@ class ActorCriticPolicy(nn.Module):
     ) -> Tuple:
         """
         Returns:
-          concepts  [B, policy_dim] or None  (Fix #2: one-hot for concept_actor_critic)
+          concepts  [B, concept_dim] or None
           values    [B]
           log_prob  [B]
           entropy   [B]
           h_new     [B, hidden_dim] or None
           V_c       [B, 1] or None
           concept_dists: list or None
-
-        Fix #1: for concept_actor_critic, actions are passed directly to concept_net
-        so Q_c(h_t, a_t) is computed in one forward pass without re-running the GRU.
-        _get_latent is used for no_concept and vanilla_freeze (no action needed there).
         """
         features = self.extract_features(obs)
-
-        if self.method == "concept_actor_critic":
-            # Pass actions so concept_net.forward() can compute Q_c(h_t, a_t).
-            # This is the training path — stored actions are available from the buffer.
-            # The return signature is the same; V_c is now action-conditional Q_c.
-            c_t, h_new, concept_dists, V_c = self.concept_net(
-                features, h_prev, actions=actions.long().flatten()
-            )
-            latent = self.mlp_extractor(c_t)
-        else:
-            latent, h_new, c_t, (V_c, concept_dists) = self._get_latent(features, h_prev)
+        latent, h_new, c_t, (V_c, concept_dists) = self._get_latent(features, h_prev)
 
         action_logits = self.action_net(latent)
         dist = Categorical(logits=action_logits)

@@ -161,11 +161,14 @@ def replay(args) -> None:
     policy = build_policy(args, env, device)
 
     frames: List[Image.Image] = []
-    h_t = (
-        torch.zeros(1, ConceptActorCritic.HIDDEN_DIM, device=device)
-        if args.method == "concept_actor_critic" and args.temporal_encoding == "gru"
-        else None
-    )
+    # Updated initialization in replay.py
+    h_t = None
+    if args.temporal_encoding == "gru":
+        # Use the HIDDEN_DIM constant from your network class
+        hidden_dim = ConceptActorCritic.HIDDEN_DIM
+        h_t = torch.zeros(1, hidden_dim, device=device) # Ensure this matches your model's hidden size 
+    else:
+        h_t = None
 
     obs, _ = env.reset(seed=args.seed)
     total_reward = 0.0

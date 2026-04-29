@@ -19,6 +19,12 @@ from .armed_corridor import (
 )
 from .cartpole import make_cartpole_env, make_single_cartpole_env
 from .dynamic_obstacles import make_dynamic_obstacles_env, make_single_dynamic_obstacles_env
+from .highway import (
+    make_highway_env,
+    make_highway_state_env,
+    make_single_highway_env,
+    make_single_highway_state_env,
+)
 from .lunar_lander import (
     make_lunar_lander_env,
     make_lunar_lander_pos_only_env,
@@ -204,6 +210,19 @@ ENV_REGISTRY: Dict[str, EnvFactorySpec] = {
         env_name="synchrony_window_state",
         make_vec=make_synchrony_window_state_env,
         make_single=make_single_synchrony_window_state_env,
+        pass_n_stack=False,
+        state_like=True,
+    ),
+    "highway": EnvFactorySpec(
+        env_name="highway",
+        make_vec=make_highway_env,
+        make_single=make_single_highway_env,
+        pass_n_stack=True,
+    ),
+    "highway_state": EnvFactorySpec(
+        env_name="highway_state",
+        make_vec=make_highway_state_env,
+        make_single=make_single_highway_state_env,
         pass_n_stack=False,
         state_like=True,
     ),

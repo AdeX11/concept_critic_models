@@ -271,7 +271,6 @@ class RolloutBuffer:
             "concept_values",
             "concept_log_probs",
             "concept_rewards",
-            "concept_actions",
             "concept_advantages",
             "concept_returns",
             "episode_starts",
@@ -302,7 +301,6 @@ class RolloutBuffer:
             "concept_values",
             "concept_log_probs",
             "concept_rewards",
-            "concept_actions",
             "concept_advantages",
             "concept_returns",
         ]:
