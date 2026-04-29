@@ -24,11 +24,17 @@ Actions:
   1: choose LEFT   (correct when cue == 0)
   2: choose RIGHT  (correct when cue == 1)
 
-Rewards:
-  +1.0  correct choice at junction
-  -1.0  wrong choice at junction
+Rewards (reward_mode='dense'):
+  +1.0  correct choice at junction (LEFT when cue=0, RIGHT when cue=1)
+  -1.0  wrong choice at junction, or forward at junction (must commit)
   -0.05 premature choice (choose action before junction)
   -0.01 per step (time pressure)
+  Episode ends on choice or max_steps.
+
+Rewards (reward_mode='sparse'):
+  +1.0  correct choice at junction only
+   0.0  everywhere else (wrong junction choice, forward at junction,
+        premature choice, each step)
   Episode ends on choice or max_steps.
 
 Concepts (2-dim, always the ground truth regardless of stacking):
@@ -63,9 +69,12 @@ class TMazeEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, seed: int = 0, corridor_len: int = 10):
+    def __init__(self, seed: int = 0, corridor_len: int = 10, reward_mode: str = "dense"):
         super().__init__()
-
+        assert reward_mode in ("dense", "sparse"), (
+            f"reward_mode must be 'dense' or 'sparse', got '{reward_mode}'"
+        )
+        self.reward_mode  = reward_mode
         self.corridor_len = corridor_len
         self.max_steps    = corridor_len + 5
 
@@ -102,24 +111,37 @@ class TMazeEnv(gym.Env):
 
     def step(self, action: int):
         self._steps += 1
-        reward = -0.01
         terminated = False
-
         at_junction = (self._pos == self.corridor_len)
 
-        if at_junction:
-            if action == 1:     # choose LEFT — correct when cue == 0
-                reward += 1.0 if self._cue == 0 else -1.0
-            elif action == 2:   # choose RIGHT — correct when cue == 1
-                reward += 1.0 if self._cue == 1 else -1.0
-            else:               # forward at junction: penalise and end
-                reward += 1.0 if self._cue == 0 else -1.0
-            terminated = True
-        else:
-            if action == 0:
-                self._pos += 1
-            else:               # premature choice in corridor
-                reward -= 0.05
+        if self.reward_mode == "dense":
+            reward = -0.01
+            if at_junction:
+                if action == 1:
+                    reward += 1.0 if self._cue == 0 else -1.0
+                elif action == 2:
+                    reward += 1.0 if self._cue == 1 else -1.0
+                else:
+                    reward += -1.0
+                terminated = True
+            else:
+                if action == 0:
+                    self._pos += 1
+                else:
+                    reward -= 0.05
+        else:  # sparse: +1 correct at junction, 0 everywhere else
+            reward = 0.0
+            if at_junction:
+                if action == 1:
+                    reward = 1.0 if self._cue == 0 else 0.0
+                elif action == 2:
+                    reward = 1.0 if self._cue == 1 else 0.0
+                # forward at junction: reward stays 0, episode ends
+                terminated = True
+            else:
+                if action == 0:
+                    self._pos += 1
+                # premature choice: no movement, no penalty
 
         truncated = (not terminated) and (self._steps >= self.max_steps)
 
@@ -217,20 +239,22 @@ class FrameStackFlatWrapper(gym.Wrapper):
 _CORRIDOR_LEN = 10
 
 
-def _make_tmaze(seed: int, n_stack: int) -> gym.Env:
-    env = TMazeEnv(seed=seed, corridor_len=_CORRIDOR_LEN)
+def _make_tmaze(seed: int, n_stack: int, reward_mode: str = "dense") -> gym.Env:
+    env = TMazeEnv(seed=seed, corridor_len=_CORRIDOR_LEN, reward_mode=reward_mode)
     if n_stack > 1:
         env = FrameStackFlatWrapper(env, n_stack)
     return env
 
 
-def make_tmaze_env(n_envs: int, seed: int, n_stack: int = 1, **_) -> SyncVectorEnv:
+def make_tmaze_env(n_envs: int, seed: int, n_stack: int = 1,
+                   reward_mode: str = "dense", **_) -> SyncVectorEnv:
     def _make(i):
         def _init():
-            return _make_tmaze(seed + i, n_stack)
+            return _make_tmaze(seed + i, n_stack, reward_mode=reward_mode)
         return _init
     return SyncVectorEnv([_make(i) for i in range(n_envs)])
 
 
-def make_single_tmaze_env(seed: int = 0, n_stack: int = 1, **_) -> gym.Env:
-    return _make_tmaze(seed, n_stack)
+def make_single_tmaze_env(seed: int = 0, n_stack: int = 1,
+                           reward_mode: str = "dense", **_) -> gym.Env:
+    return _make_tmaze(seed, n_stack, reward_mode=reward_mode)

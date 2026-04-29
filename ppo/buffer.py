@@ -180,7 +180,7 @@ class RolloutBuffer:
         self.returns = self.advantages + self.values
 
     # ------------------------------------------------------------------
-    # Concept advantage for concept_actor_critic
+    # Concept advantage for concept_ac
     # ------------------------------------------------------------------
 
     def compute_concept_returns_and_advantage(

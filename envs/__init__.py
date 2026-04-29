@@ -1,4 +1,3 @@
-from .cartpole import make_cartpole_env, VisionCartPoleEnv
 from .dynamic_obstacles import make_dynamic_obstacles_env, DynamicObstaclesEnvWrapper
 from .lunar_lander import make_lunar_lander_env, LunarLanderConceptEnv
 from .armed_corridor import (

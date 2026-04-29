@@ -12,9 +12,12 @@ Ground truth is the raw physics state from CartPole-v1.
 from collections import deque
 from typing import Optional, Tuple
 
-import cv2
 import gymnasium as gym
 import numpy as np
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 class VisionCartPoleEnv(gym.Wrapper):
@@ -31,6 +34,10 @@ class VisionCartPoleEnv(gym.Wrapper):
 
     def __init__(self, env: gym.Env, ROWS: int = 160, COLS: int = 240, img_stack: int = 4):
         super().__init__(env)
+        if cv2 is None:
+            raise ImportError(
+                "VisionCartPoleEnv requires OpenCV (cv2). Install opencv-python in this environment."
+            )
         self.ROWS = ROWS
         self.COLS = COLS
         self.img_stack = img_stack
