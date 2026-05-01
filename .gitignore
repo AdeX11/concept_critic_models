@@ -22,3 +22,7 @@ env/
 
 # OS
 .DS_Store
+
+# Final sweep outputs
+final_plots/
+final_results/

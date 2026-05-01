@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
 # Headless rendering setup
 export SDL_VIDEODRIVER=dummy
 export PYGAME_HIDE_SUPPORT_PROMPT=1
@@ -11,7 +14,7 @@ TS="${2:-100000}"
 SEED="${3:-42}"
 
 # --- Hyperparams ---
-N_ENVS=2
+N_ENVS=4
 N_STEPS=512
 N_EPOCHS=10
 BATCH_SIZE=256
@@ -19,30 +22,30 @@ DEVICE="cpu"
 
 # --- Directory Logic ---
 RESULTS_BASE="results"
-PLOT_DIR="plots/${ENV}_seed${SEED}"
-REPLAY_DIR="$PLOT_DIR/replays"
+FINAL_PLOTS="final_plots"
+FINAL_RESULTS="final_results"
 
 mkdir -p "$RESULTS_BASE"
-mkdir -p "$REPLAY_DIR"
+mkdir -p "$FINAL_PLOTS"
+mkdir -p "$FINAL_RESULTS"
 
 echo "=========================================================="
-echo "STARTING EXPERIMENT: $ENV | Seed: $SEED | TS: $TS"
+echo "SWEEP EXPERIMENT: $ENV | Seed: $SEED | TS: $TS"
 echo "=========================================================="
 
 # ---------------------------------------------------------------------------
-# Helper: train + replay
+# Helper: train only (no replay for speed)
 # ---------------------------------------------------------------------------
-train_and_replay() {
+train_only() {
     local method="$1"
     local mode="$2"
-    local temporal="${3:-gru}"
-    
+    local temporal="${3:-none}"
+
     local folder_name="${method}_${mode}_${temporal}_${ENV}_seed${SEED}"
     local full_out_dir="$RESULTS_BASE/$folder_name"
-    local gif_path="$REPLAY_DIR/${method}_replay.gif"
 
     echo ""
-    echo ">> [STEP 1/2] Training: $method ($mode | $temporal)"
+    echo ">> Training: $method ($mode | $temporal)"
     python train.py \
         --method "$method" \
         --training_mode "$mode" \
@@ -55,54 +58,54 @@ train_and_replay() {
         --n_epochs "$N_EPOCHS" \
         --batch_size "$BATCH_SIZE" \
         --device "$DEVICE" \
-        --output_dir "$RESULTS_BASE"
-
-    echo ">> [STEP 2/2] Replaying: $method"
-    python replay.py \
-        --env "$ENV" \
-        --method "$method" \
-        --temporal_encoding "$temporal" \
-        --model_path "$full_out_dir/model.pt" \
-        --output_gif "$gif_path" \
-        --episodes 5 \
-        --seed "$SEED" \
-        --deterministic \
-        ${4:+--show_concepts}
+        --output_dir "$RESULTS_BASE" &
+    
+    PIDS+=($!)
 }
 
 # ---------------------------------------------------------------------------
-# Run Methods (NOW PARALLEL)
+# Run all 9 combinations (NOW PARALLEL)
 # ---------------------------------------------------------------------------
 PIDS=()
 
-# train_and_replay "no_concept" "two_phase" "gru" &
-# PIDS+=($!)
+# 1) no_concept baseline
+train_only "no_concept" "two_phase" "none"
 
-train_and_replay "concept_actor_critic" "joint" "none" &
-PIDS+=($!)
+# 2-5) vanilla_freeze variants
+train_only "vanilla_freeze" "two_phase" "none"
+train_only "vanilla_freeze" "two_phase" "gru"
+train_only "vanilla_freeze" "joint" "none"
+train_only "vanilla_freeze" "joint" "gru"
 
-train_and_replay "concept_actor_critic" "joint" "gru" "show_concepts" &
-PIDS+=($!)
+# 6-9) concept_actor_critic variants
+train_only "concept_actor_critic" "two_phase" "none"
+train_only "concept_actor_critic" "two_phase" "gru"
+train_only "concept_actor_critic" "joint" "none"
+train_only "concept_actor_critic" "joint" "gru"
 
 echo ""
 echo "Running ${#PIDS[@]} jobs in parallel..."
 echo ""
 
-# WAIT for all training+replay jobs
+# WAIT FOR ALL TRAINING TO FINISH
 wait "${PIDS[@]}"
 
 # ---------------------------------------------------------------------------
-# Final Plotting
+# Final Comparison
 # ---------------------------------------------------------------------------
 echo ""
 echo "=========================================================="
-echo "GENERATING COMPARISON PLOTS -> $PLOT_DIR"
+echo "GENERATING COMPARISON -> $FINAL_PLOTS & $FINAL_RESULTS"
 echo "=========================================================="
 
-python plot_results.py \
+python compare_sweep.py \
     --env "$ENV" \
     --results_dir "$RESULTS_BASE" \
-    --output_dir "$PLOT_DIR" \
-    --smooth_window 30
+    --output_plots "$FINAL_PLOTS" \
+    --output_results "$FINAL_RESULTS"
 
-echo "Done. Comparison data and GIFs available in: $PLOT_DIR"
+echo ""
+echo "Done. Final outputs:"
+echo "  Plots:   $FINAL_PLOTS"
+echo "  Results: $FINAL_RESULTS"
+
