@@ -19,6 +19,7 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+!colab/*.ipynb
 
 # OS
 .DS_Store
