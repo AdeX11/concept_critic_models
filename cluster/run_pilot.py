@@ -383,6 +383,46 @@ def print_or_submit(configs: Iterable[RunConfig], output_dir: str, dry_run: bool
     print(f"[pilot] generated {count} job(s)")
 
 
+LEAN_TIMESTEPS_COMPARE = PILOT_TIMESTEPS         # 300k
+LEAN_TIMESTEPS_CONFIRM = CONFIRM_TIMESTEPS       # 1M
+
+
+def lean_configs(
+    benchmarks: Sequence[str],
+    total_timesteps: int,
+) -> List[RunConfig]:
+    """Lean 4-config matrix per benchmark.
+
+    Matches the cross-branch consensus in main/angelic/Ade run_short.sh:
+      - no_concept                + gru
+      - vanilla_freeze two_phase  + gru
+      - concept_actor_critic two_phase + gru
+      - concept_actor_critic two_phase + none   (gru-vs-none ablation)
+    """
+    configs: List[RunConfig] = []
+    for benchmark_id in benchmarks:
+        configs.append(RunConfig(
+            benchmark_id=benchmark_id, method="no_concept",
+            temporal_encoding="gru", total_timesteps=total_timesteps,
+        ))
+        configs.append(RunConfig(
+            benchmark_id=benchmark_id, method="vanilla_freeze",
+            training_mode="two_phase", temporal_encoding="gru",
+            total_timesteps=total_timesteps,
+        ))
+        configs.append(RunConfig(
+            benchmark_id=benchmark_id, method="concept_actor_critic",
+            training_mode="two_phase", temporal_encoding="gru",
+            total_timesteps=total_timesteps,
+        ))
+        configs.append(RunConfig(
+            benchmark_id=benchmark_id, method="concept_actor_critic",
+            training_mode="two_phase", temporal_encoding="none",
+            total_timesteps=total_timesteps,
+        ))
+    return configs
+
+
 def build_configs(args: argparse.Namespace) -> List[RunConfig]:
     benchmarks = tuple(args.benchmarks)
     if args.round_name == "round1":
@@ -391,6 +431,10 @@ def build_configs(args: argparse.Namespace) -> List[RunConfig]:
             include_gvf=args.include_gvf,
             gvf_pairing=args.gvf_pairing,
         )
+    if args.round_name == "lean_compare":
+        return lean_configs(benchmarks, total_timesteps=LEAN_TIMESTEPS_COMPARE)
+    if args.round_name == "lean_confirm":
+        return lean_configs(benchmarks, total_timesteps=LEAN_TIMESTEPS_CONFIRM)
 
     rows = _rows_from_results(args.results_root)
     if args.round_name == "round2":
@@ -414,7 +458,11 @@ def main() -> None:
         "--round",
         dest="round_name",
         required=True,
-        choices=("round1", "round2", "round3", "round4", "revalidate", "confirm", "ablation"),
+        choices=(
+            "round1", "round2", "round3", "round4",
+            "revalidate", "confirm", "ablation",
+            "lean_compare", "lean_confirm",
+        ),
     )
     parser.add_argument("--benchmarks", nargs="+", default=list(PILOT_BENCHMARKS))
     parser.add_argument("--results_root", default="results")

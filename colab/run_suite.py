@@ -81,8 +81,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Stage 0 pilot on Colab.")
     parser.add_argument(
         "--round", dest="round_name", required=True,
-        choices=("round1", "round2", "round3", "round4",
-                 "revalidate", "confirm", "ablation"),
+        choices=(
+            "round1", "round2", "round3", "round4",
+            "revalidate", "confirm", "ablation",
+            "lean_compare", "lean_confirm",
+        ),
     )
     parser.add_argument(
         "--benchmarks", nargs="+",
