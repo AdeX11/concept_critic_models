@@ -178,10 +178,16 @@ class PPO:
         # ---- Tracking ----
         self.num_timesteps = 0
         self.episode_rewards: List[List[float]] = [[] for _ in range(self.n_envs)]
+        self.episode_lengths: List[int] = [0 for _ in range(self.n_envs)]
         self.episode_reward_history: deque = deque(maxlen=10_000)
+        self.episode_length_history: deque = deque(maxlen=10_000)
         # concept_acc_log: list of (timestep, {concept_name: metric})
         self.concept_acc_log: List[Tuple[int, dict]] = []
+        self.concept_diagnostic_log: List[Tuple[int, dict]] = []
         self.eval_log: List[Tuple[int, dict]] = []
+        self._last_rollout_action_histogram: List[int] = []
+        self._last_rollout_dominant_action_fraction: Optional[float] = None
+        self._last_rollout_terminal_info_counts: Dict[str, Dict[str, int]] = {}
         self._last_obs = None
         self._last_episode_starts = np.ones((self.n_envs,), dtype=bool)
         self._last_hidden = torch.zeros(self.n_envs, hidden_dim, device=self.device)
@@ -283,6 +289,9 @@ class PPO:
                 acc = self._compute_concept_accuracy_from_buffer()
                 if acc:
                     self.concept_acc_log.append((self.num_timesteps, acc))
+                    diagnostics = self._compute_concept_diagnostics_from_buffer()
+                    if diagnostics:
+                        self.concept_diagnostic_log.append((self.num_timesteps, diagnostics))
                     # Also compute raw MSE per concept for logging
                     concept_loss_log = self._compute_concept_mse_from_buffer()
 
@@ -298,6 +307,19 @@ class PPO:
                         f"  cc_loss={concept_ac_stats.get('concept_critic_loss', 0):.4f}"
                         f"  ce_loss={concept_ac_stats.get('concept_ent_loss', 0):.4f}"
                     )
+                if self._last_rollout_action_histogram:
+                    extra += (
+                        f"  action_dom="
+                        f"{self._last_rollout_dominant_action_fraction:.3f}"
+                    )
+                if self._last_rollout_terminal_info_counts:
+                    terminal_bits = []
+                    for key in ("failure_reason", "success", "route_taken"):
+                        counts = self._last_rollout_terminal_info_counts.get(key)
+                        if counts:
+                            terminal_bits.append(f"{key}={counts}")
+                    if terminal_bits:
+                        extra += "  terminal=[" + " ".join(terminal_bits) + "]"
                 if concept_loss_log:
                     mse_str = "  ".join(
                         f"{n}={v:.5f}" for n, v in concept_loss_log.items()
@@ -318,9 +340,27 @@ class PPO:
                 self.writer.add_scalar("train/mean_episode_reward", float(np.mean(recent)), self.num_timesteps)
                 self.writer.add_scalar("train/pg_loss", policy_stats.get("pg_loss", 0.0), self.num_timesteps)
                 self.writer.add_scalar("train/vf_loss", policy_stats.get("vf_loss", 0.0), self.num_timesteps)
+                self.writer.add_scalar("train/ent_loss", policy_stats.get("ent_loss", 0.0), self.num_timesteps)
+                if self._last_rollout_dominant_action_fraction is not None:
+                    self.writer.add_scalar(
+                        "train/rollout_dominant_action_fraction",
+                        float(self._last_rollout_dominant_action_fraction),
+                        self.num_timesteps,
+                    )
                 if concept_ac_stats:
                     for key, value in concept_ac_stats.items():
                         self.writer.add_scalar(f"concept/{key}", float(value), self.num_timesteps)
+                if self.concept_diagnostic_log:
+                    _, concept_diagnostics = self.concept_diagnostic_log[-1]
+                    for name, metrics in concept_diagnostics.items():
+                        if isinstance(metrics, dict):
+                            for metric_name, value in metrics.items():
+                                if isinstance(value, (int, float)):
+                                    self.writer.add_scalar(
+                                        f"concept_diag/{name}/{metric_name}",
+                                        float(value),
+                                        self.num_timesteps,
+                                    )
                 if concept_loss_log:
                     for key, value in concept_loss_log.items():
                         self.writer.add_scalar(f"concept/mse/{key}", float(value), self.num_timesteps)
@@ -394,7 +434,9 @@ class PPO:
                 if self.policy.optimizer_concept_and_features is not None else None
             ),
             "episode_reward_history": list(self.episode_reward_history),
+            "episode_length_history": list(self.episode_length_history),
             "concept_acc_log": self.concept_acc_log,
+            "concept_diagnostic_log": self.concept_diagnostic_log,
             "eval_log": self.eval_log,
             "resume_state": {
                 "query_count": self._resume_query_count,
@@ -422,7 +464,9 @@ class PPO:
             )
         self.num_timesteps = int(state.get("num_timesteps", 0))
         self.episode_reward_history = deque(state.get("episode_reward_history", []), maxlen=10_000)
+        self.episode_length_history = deque(state.get("episode_length_history", []), maxlen=10_000)
         self.concept_acc_log = list(state.get("concept_acc_log", []))
+        self.concept_diagnostic_log = list(state.get("concept_diagnostic_log", []))
         self.eval_log = list(state.get("eval_log", []))
         resume_state = state.get("resume_state", {})
         self._resume_query_count = int(resume_state.get("query_count", 0))
@@ -442,6 +486,56 @@ class PPO:
     # collect_rollouts
     # ==================================================================
 
+    def _update_rollout_info_counts(
+        self,
+        infos,
+        dones: np.ndarray,
+        counts: Dict[str, Dict[str, int]],
+    ) -> None:
+        """Accumulate terminal info counts from vector-env info structures."""
+        if infos is None:
+            return
+
+        if isinstance(infos, (list, tuple)):
+            iterable = infos
+        elif isinstance(infos, dict):
+            # Gymnasium vector envs commonly return dict-of-arrays. Ignore
+            # private mask keys and count scalar entries per environment.
+            n = None
+            for value in infos.values():
+                if hasattr(value, "__len__") and not isinstance(value, (str, bytes)):
+                    n = len(value)
+                    break
+            if n is None:
+                iterable = [infos]
+            else:
+                iterable = []
+                for i in range(n):
+                    item = {}
+                    for key, value in infos.items():
+                        if key.startswith("_"):
+                            continue
+                        try:
+                            item[key] = value[i]
+                        except Exception:
+                            item[key] = value
+                    iterable.append(item)
+        else:
+            return
+
+        for idx, info in enumerate(iterable):
+            if idx >= len(dones) or not bool(dones[idx]):
+                continue
+            if not isinstance(info, dict):
+                continue
+            flat = flatten_terminal_info(dict(info))
+            for key, value in flat.items():
+                if key in ("terminal_observation", "concept"):
+                    continue
+                value_key = str(value)
+                counts.setdefault(key, {})
+                counts[key][value_key] = counts[key].get(value_key, 0) + 1
+
     def collect_rollouts(self) -> None:
         """
         Run policy for n_steps, fill rollout buffer.
@@ -454,6 +548,9 @@ class PPO:
         obs = self._last_obs
         episode_starts = self._last_episode_starts.copy()
         h_t = self._last_hidden.clone()
+        n_actions = int(self.env.single_action_space.n)
+        rollout_action_counts = np.zeros(n_actions, dtype=np.int64)
+        rollout_terminal_counts: Dict[str, Dict[str, int]] = {}
 
         for _ in range(self.n_steps):
             obs_tensor = _obs_to_tensor(obs, self.device)
@@ -534,16 +631,24 @@ class PPO:
 
             # Step environment
             np_actions = actions.cpu().numpy()
+            for action in np_actions:
+                action_i = int(action)
+                if 0 <= action_i < n_actions:
+                    rollout_action_counts[action_i] += 1
             next_obs, rewards, terminated, truncated, infos = self.env.step(np_actions)
             dones = np.logical_or(terminated, truncated)
+            self._update_rollout_info_counts(infos, dones, rollout_terminal_counts)
 
             # Track episode rewards
             for i in range(self.n_envs):
                 self.episode_rewards[i].append(rewards[i])
+                self.episode_lengths[i] += 1
                 if dones[i]:
                     ep_rew = sum(self.episode_rewards[i])
                     self.episode_reward_history.append(ep_rew)
+                    self.episode_length_history.append(self.episode_lengths[i])
                     self.episode_rewards[i] = []
+                    self.episode_lengths[i] = 0
 
             # Store
             self.rollout_buffer.add(
@@ -579,6 +684,13 @@ class PPO:
         self._last_obs = obs
         self._last_episode_starts = episode_starts
         self._last_hidden = h_t
+        self._last_rollout_action_histogram = rollout_action_counts.tolist()
+        total_actions = int(rollout_action_counts.sum())
+        self._last_rollout_dominant_action_fraction = (
+            float(rollout_action_counts.max() / total_actions)
+            if total_actions > 0 else None
+        )
+        self._last_rollout_terminal_info_counts = rollout_terminal_counts
 
         # Compute GAE
         with torch.no_grad():
@@ -1131,6 +1243,55 @@ class PPO:
             else:
                 metrics[name] = float(np.mean((p - t) ** 2))
         return metrics
+
+    def _compute_concept_diagnostics_from_buffer(self) -> dict:
+        """
+        Per-concept diagnostics for imbalanced classification concepts.
+
+        Raw accuracy can look strong when rare concepts are almost always false.
+        This returns per-class support and balanced accuracy so we can see when a
+        concept head is succeeding only by predicting majority classes.
+        """
+        c_pred_np, c_true_np, _ = self._gather_concept_preds_from_buffer()
+        if c_pred_np is None or len(c_pred_np) == 0:
+            return {}
+        diagnostics = {}
+        for i, (name, tt) in enumerate(zip(self.concept_names, self.policy.task_types)):
+            p = c_pred_np[:, i]
+            t = c_true_np[:, i]
+            if tt == "classification":
+                pred = np.round(p).astype(np.int64)
+                truth = t.astype(np.int64)
+                classes = sorted(set(truth.tolist()) | set(pred.tolist()))
+                recalls = []
+                support = {}
+                pred_counts = {}
+                correct = 0
+                for cls in classes:
+                    cls_mask = truth == cls
+                    cls_support = int(cls_mask.sum())
+                    support[str(cls)] = cls_support
+                    pred_counts[str(cls)] = int((pred == cls).sum())
+                    if cls_support > 0:
+                        cls_correct = int(((pred == cls) & cls_mask).sum())
+                        correct += cls_correct
+                        recalls.append(cls_correct / cls_support)
+                diagnostics[name] = {
+                    "accuracy": float(np.mean(pred == truth)),
+                    "balanced_accuracy": float(np.mean(recalls)) if recalls else 0.0,
+                    "n_samples": int(len(truth)),
+                    "n_classes_seen": int(len([v for v in support.values() if v > 0])),
+                    "support": support,
+                    "pred_counts": pred_counts,
+                }
+            else:
+                mse = float(np.mean((p - t) ** 2))
+                diagnostics[name] = {
+                    "mse": mse,
+                    "n_samples": int(len(t)),
+                    "target_std": float(np.std(t)),
+                }
+        return diagnostics
 
     def _compute_concept_mse_from_buffer(self) -> dict:
         """

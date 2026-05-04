@@ -44,6 +44,7 @@ CSV_FIELDS = [
     "terminal_cause_breakdown",
     "terminal_info_counts",
     "concept_metrics",
+    "concept_diagnostics",
 ]
 
 TERMINAL_CAUSE_KEYS = (
@@ -90,6 +91,18 @@ def _load_concept_metrics(run_dir: Path) -> Dict[str, float]:
         return {}
 
 
+def _load_concept_diagnostics(run_dir: Path) -> Dict[str, Any]:
+    path = run_dir / "concept_diagnostics.json"
+    if not path.exists():
+        return {}
+    payload = _load_json(path)
+    entries = payload.get("concept_diagnostics") or []
+    if not entries:
+        return {}
+    metrics = entries[-1].get("metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
 def _terminal_cause_breakdown(terminal_info_counts: Dict[str, Any]) -> Dict[str, Any]:
     for key in TERMINAL_CAUSE_KEYS:
         counts = terminal_info_counts.get(key)
@@ -116,6 +129,7 @@ def collect_rows(results_root: str | Path) -> List[Dict[str, Any]]:
         row["terminal_info_counts"] = terminal_info_counts
         row["terminal_cause_breakdown"] = _terminal_cause_breakdown(terminal_info_counts)
         row["concept_metrics"] = _load_concept_metrics(run_dir)
+        row["concept_diagnostics"] = _load_concept_diagnostics(run_dir)
         rows.append(_jsonable(row))
     return rows
 
@@ -128,7 +142,7 @@ def write_csv(rows: List[Dict[str, Any]], path: str | Path) -> None:
         writer.writeheader()
         for row in rows:
             csv_row = dict(row)
-            for field in ("terminal_cause_breakdown", "terminal_info_counts", "concept_metrics"):
+            for field in ("terminal_cause_breakdown", "terminal_info_counts", "concept_metrics", "concept_diagnostics"):
                 csv_row[field] = json.dumps(csv_row.get(field, {}), sort_keys=True)
             writer.writerow(csv_row)
 

@@ -237,6 +237,17 @@ def main() -> None:
         np.savez(os.path.join(out_dir, "concept_acc.npz"),
                  timesteps=timesteps, names=np.array(names), values=values)
         print(f"[train] saved concept accuracy log → {out_dir}/concept_acc.npz")
+    if model.concept_diagnostic_log:
+        write_json(
+            os.path.join(out_dir, "concept_diagnostics.json"),
+            {
+                "concept_diagnostics": [
+                    {"timesteps": t, "metrics": m}
+                    for t, m in model.concept_diagnostic_log
+                ]
+            },
+        )
+        print(f"[train] saved concept diagnostics → {out_dir}/concept_diagnostics.json")
 
     # ---- Quick evaluation ----
     final_eval = model.evaluate_detailed(n_episodes=args.eval_episodes, deterministic=True)
