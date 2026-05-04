@@ -77,6 +77,39 @@ def append_progress(progress_path: Path, entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+def run_train_process(cmd: List[str], log_path: Path, stream_train_logs: bool) -> int:
+    """Run train.py, always saving train.log, optionally teeing live output."""
+    with log_path.open("w") as logf:
+        if not stream_train_logs:
+            proc = subprocess.run(
+                cmd, stdout=logf, stderr=subprocess.STDOUT, check=False,
+            )
+            return proc.returncode
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                logf.write(line)
+                logf.flush()
+                print(line, end="", flush=True)
+        except KeyboardInterrupt:
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            raise
+        return proc.wait()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Stage 0 pilot on Colab.")
     parser.add_argument(
@@ -106,6 +139,11 @@ def main() -> None:
     )
     parser.add_argument("--include_gvf", action="store_true")
     parser.add_argument("--gvf_pairing", default=None)
+    parser.add_argument(
+        "--stream_train_logs",
+        action="store_true",
+        help="Tee each train.py subprocess to notebook/stdout while still writing train.log.",
+    )
     parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
 
@@ -126,7 +164,8 @@ def main() -> None:
     print(
         f"[suite] round={args.round_name} "
         f"total={len(configs)} pending={len(pending)} "
-        f"skipped(complete)={skipped}"
+        f"skipped(complete)={skipped} "
+        f"stream_train_logs={'on' if args.stream_train_logs else 'off'}"
     )
     if args.dry_run:
         for config, rd in pending:
@@ -148,21 +187,18 @@ def main() -> None:
         cmd = train_command(config, output_dir)
         rd.mkdir(parents=True, exist_ok=True)
         log_path = rd / "train.log"
-        print(f"[suite] [{idx}/{len(pending)}] launching: {rd.name}")
+        print(f"[suite] [{idx}/{len(pending)}] launching: {rd.name}", flush=True)
         run_started = time.time()
-        with log_path.open("w") as logf:
-            proc = subprocess.run(
-                cmd, stdout=logf, stderr=subprocess.STDOUT, check=False,
-            )
+        returncode = run_train_process(cmd, log_path, args.stream_train_logs)
         run_duration_s = time.time() - run_started
-        ok = proc.returncode == 0 and is_complete(rd)
+        ok = returncode == 0 and is_complete(rd)
         completed += int(ok)
         failed += int(not ok)
         append_progress(progress_path, {
             "ts": time.time(),
             "run_dir": rd.name,
             "ok": ok,
-            "returncode": proc.returncode,
+            "returncode": returncode,
             "duration_s": run_duration_s,
             "method": config.method,
             "benchmark_id": config.benchmark_id,
@@ -171,7 +207,7 @@ def main() -> None:
             "temporal_encoding": config.temporal_encoding,
             "total_timesteps": config.total_timesteps,
         })
-        status = "ok" if ok else f"FAIL(rc={proc.returncode})"
+        status = "ok" if ok else f"FAIL(rc={returncode})"
         print(f"[suite] [{idx}/{len(pending)}] {status} in {run_duration_s:.0f}s")
 
     elapsed = time.time() - started_at
