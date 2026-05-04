@@ -3,13 +3,19 @@ train.py — Unified training entry point.
 
 Usage:
   python train.py --method no_concept           --env cartpole           --seed 42
-  python train.py --method vanilla_freeze        --env dynamic_obstacles  --seed 42
-  python train.py --method concept_actor_critic  --env lunar_lander       --seed 42
+  python train.py --method vanilla_freeze        --env dynamic_obstacles  --seed 42 --training_mode two_phase
+  python train.py --method concept_actor_critic  --env lunar_lander       --seed 42 --temporal_encoding gru --training_mode joint
 
-All results are saved to results/<method>_<env>_seed<seed>/ as:
-  - rewards.npy       — episode reward history
-  - concept_acc.npy   — concept accuracy log (if applicable)
-  - model.pt          — saved policy state_dict
+Parameters:
+  --method            : no_concept | vanilla_freeze | concept_actor_critic
+  --training_mode     : two_phase | end_to_end | joint
+  --temporal_encoding : none | stacked | gru
+
+Output: results/<method>_<training_mode>_<temporal_encoding>_<env>_seed<seed>/
+  - rewards.npy      — episode reward history
+  - concept_acc.npz  — concept accuracy log (if applicable)
+  - model.pt         — saved policy state_dict
+  - eval.txt         — final eval reward
 """
 
 import argparse
@@ -64,27 +70,26 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, temporal_e
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RL agent with optional concept bottleneck.")
     parser.add_argument("--method", required=True,
-                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic", "gvf"])
+                        choices=["no_concept", "vanilla_freeze", "concept_actor_critic"])
     parser.add_argument("--benchmark", default=None, choices=list_benchmark_ids())
     parser.add_argument("--env", default=None, choices=list_env_names())
-    parser.add_argument("--temporal_encoding", type=str, default="none",
-                        choices=["gru", "stacked", "none"],
-                        help="Temporal encoding for concept_actor_critic: "
-                             "'gru' (GRUCell in network), 'stacked' (env-level frame stack), "
-                             "'none' (no temporal info, ablation)")
     parser.add_argument("--training_mode", type=str, default="two_phase",
                         choices=["two_phase", "end_to_end", "joint"],
-                        help="'two_phase': concept net frozen during PPO update (LICORICE-style); "
-                             "'end_to_end': policy gradient flows through concept net; "
-                             "'joint': end_to_end plus per-iteration supervised rollout concept updates")
+                        help="Training mode: 'two_phase' (freeze concept net during PPO update), "
+                             "'end_to_end' (policy gradient flows through concept net), "
+                             "'joint' (combined loss)")
+    parser.add_argument("--temporal_encoding", type=str, default="none",
+                        choices=["gru", "stacked", "none"],
+                        help="Temporal encoding: "
+                             "'gru' (GRUCell hidden state), "
+                             "'stacked' (env-level frame stack), "
+                             "'none' (single-frame, no memory)")
     parser.add_argument("--seed",              type=int,   default=42)
     parser.add_argument("--total_timesteps",   type=int,   default=None)
     parser.add_argument("--num_labels",        type=int,   default=None,
                         help="Total labeled samples across all queries")
     parser.add_argument("--query_num_times",   type=int,   default=None,
                         help="How many times to query labels during training")
-    parser.add_argument("--gvf_pairing", type=str, default=None,
-                        help="Comma-separated 0-based concept indices for GVF heads; defaults to all concepts")
     parser.add_argument("--n_envs",            type=int,   default=4)
     parser.add_argument("--n_steps",           type=int,   default=512)
     parser.add_argument("--n_epochs",          type=int,   default=10)
@@ -93,9 +98,9 @@ def main() -> None:
     parser.add_argument("--ent_coef",          type=float, default=0.01)
     parser.add_argument("--vf_coef",           type=float, default=0.5)
     parser.add_argument("--lambda_v",          type=float, default=0.5,
-                        help="Concept critic loss weight (concept_actor_critic only)")
+                        help="Concept critic loss weight (concept_ac only)")
     parser.add_argument("--lambda_s",          type=float, default=0.5,
-                        help="Supervised anchor loss weight (concept_actor_critic only)")
+                        help="Supervised anchor loss weight (concept_ac only)")
     parser.add_argument("--device",            type=str,   default="auto")
     parser.add_argument("--output_dir",        type=str,   default="results")
     parser.add_argument("--resume_from",       type=str,   default=None)
@@ -116,15 +121,18 @@ def main() -> None:
         args.num_labels = benchmark_spec.canonical_num_labels if benchmark_spec is not None else 500
     if args.query_num_times is None:
         args.query_num_times = benchmark_spec.canonical_query_num_times if benchmark_spec is not None else 1
-    gvf_pairing = None
-    if args.gvf_pairing:
-        gvf_pairing = [
-            int(part.strip())
-            for part in args.gvf_pairing.split(",")
-            if part.strip()
-        ]
 
     set_seed(args.seed)
+
+    # Map old method names → PPO concept_net
+    _method_to_concept_net = {
+        "no_concept": "none",
+        "vanilla_freeze": "cbm",
+        "concept_actor_critic": "concept_ac",
+    }
+    concept_net = _method_to_concept_net[args.method]
+    freeze_concept = (args.training_mode == "two_phase")
+    supervision = "online"  # always on
 
     out_dir = os.path.join(
         args.output_dir,
@@ -143,7 +151,6 @@ def main() -> None:
         "total_timesteps": args.total_timesteps,
         "num_labels": args.num_labels,
         "query_num_times": args.query_num_times,
-        "gvf_pairing": gvf_pairing,
         "n_envs": args.n_envs,
         "n_steps": args.n_steps,
         "n_epochs": args.n_epochs,
@@ -167,12 +174,10 @@ def main() -> None:
         "cuda" if torch.cuda.is_available() else "cpu"
     )
     policy_kwargs["temporal_encoding"] = args.temporal_encoding
-    if args.method == "gvf" and gvf_pairing is not None:
-        policy_kwargs["gvf_pairing"] = gvf_pairing
 
     # ---- PPO ----
     model = PPO(
-        method         = args.method,
+        concept_net    = concept_net,
         env            = vec_env,
         policy_kwargs  = policy_kwargs,
         n_steps        = args.n_steps,
@@ -187,7 +192,8 @@ def main() -> None:
         learning_rate  = args.learning_rate,
         lambda_v       = args.lambda_v,
         lambda_s       = args.lambda_s,
-        training_mode  = args.training_mode,
+        freeze_concept = freeze_concept,
+        supervision    = supervision,
         normalize_advantage = True,
         seed           = args.seed,
         device         = args.device,
@@ -204,8 +210,8 @@ def main() -> None:
     labels_per_query = max(1, args.num_labels // max(args.query_num_times, 1))
 
     model.learn(
-        total_timesteps   = args.total_timesteps,
-        query_num_times   = args.query_num_times if args.method != "no_concept" else 0,
+        total_timesteps       = args.total_timesteps,
+        query_num_times       = args.query_num_times if concept_net != "none" else 0,
         query_labels_per_time = labels_per_query,
         eval_every_timesteps = args.eval_every_timesteps,
         eval_n_episodes      = args.eval_episodes,

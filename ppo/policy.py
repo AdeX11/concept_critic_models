@@ -1,11 +1,10 @@
 """
-policy.py — ActorCriticPolicy supporting all three methods.
+policy.py — ActorCriticPolicy supporting all three concept_net types.
 
-Methods:
-  no_concept        — features → mlp_extractor → actor/critic
-  vanilla_freeze    — features → FlexibleMultiTaskNetwork → mlp_extractor → actor/critic
-  concept_actor_critic — features → ConceptActorCritic (GRU) → mlp_extractor → actor/critic
-  gvf               — features → GVFConceptNetwork(concepts+gvfs) → mlp_extractor → actor/critic
+concept_net:
+  'none'       — features → mlp_extractor → actor/critic  (plain PPO)
+  'cbm'        — features → CBMNetwork → mlp_extractor → actor/critic
+  'concept_ac' — features → ConceptActorCritic → mlp_extractor → actor/critic
 
 CNN feature extractor: NatureCNN for image observations, MLP for vector.
 Dict observations are handled by extracting the 'images' key (primary modality).
@@ -19,8 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from .networks import FlexibleMultiTaskNetwork, ConceptActorCritic
-from .gvf import GVFConceptNetwork
+from .networks import CBMNetwork, ConceptActorCritic
 
 
 # ---------------------------------------------------------------------------
@@ -91,13 +89,13 @@ class MlpExtractor(nn.Module):
 
 class ActorCriticPolicy(nn.Module):
     """
-    Unified actor-critic policy for all supported methods.
+    Unified actor-critic policy for all three concept_net types.
 
     Parameters
     ----------
     obs_shape    : tuple or dict of tuples
     n_actions    : int  (discrete action space size)
-    method       : 'no_concept' | 'vanilla_freeze' | 'concept_actor_critic' | 'gvf'
+    concept_net  : 'none' | 'cbm' | 'concept_ac'
     task_types   : list of 'classification' | 'regression'  (one per concept)
     num_classes  : list of ints  (K per concept; 0 for regression)
     concept_dim  : total number of concepts
@@ -109,11 +107,10 @@ class ActorCriticPolicy(nn.Module):
         self,
         obs_shape,
         n_actions: int,
-        method: str,
+        concept_net: str,
         task_types: List[str],
         num_classes: List[int],
         concept_dim: int,
-        gvf_pairing: Optional[List[int]] = None,
         temporal_encoding: str = "none",
         features_dim: int = 512,
         net_arch: Optional[List[int]] = None,
@@ -123,12 +120,13 @@ class ActorCriticPolicy(nn.Module):
         self.obs_shape = obs_shape
         self.obs_is_dict = isinstance(obs_shape, dict)
         self.n_actions = n_actions
-        self.method = method
+        self.concept_net_type = concept_net
+        # User-facing method name (for downstream compatibility: replay, compare, interpretability)
+        _method_map = {"none": "no_concept", "cbm": "vanilla_freeze", "concept_ac": "concept_actor_critic"}
+        self.method = _method_map.get(concept_net, "no_concept")
         self.task_types = task_types
         self.num_classes = num_classes
         self.concept_dim = concept_dim
-        self.gvf_pairing = list(gvf_pairing or [])
-        self.num_gvf = len(self.gvf_pairing)
         self.temporal_encoding = temporal_encoding
         self.features_dim = features_dim
         self._device = torch.device(device) if isinstance(device, str) else device
@@ -152,39 +150,20 @@ class ActorCriticPolicy(nn.Module):
 
         # ---- Concept module ----
         self.concept_net: Optional[nn.Module] = None
-        if method == "vanilla_freeze":
-            self.concept_net = FlexibleMultiTaskNetwork(
-                features_dim, task_types, num_classes
+        if concept_net == "cbm":
+            self.concept_net = CBMNetwork(
+                features_dim, task_types, num_classes,
+                temporal_encoding=temporal_encoding,
             )
-            # vanilla_freeze outputs scalar class indices [B, n_concepts];
-            # the policy MLP receives n_concepts floats.
             mlp_input_dim = concept_dim
-        elif method == "concept_actor_critic":
-            # Fix #1: pass n_actions so the concept critic can be action-conditional
-            #         Q_c(h_t, a_t) instead of passive V_c(h_t).
-            # Fix #2: mlp_input_dim is now concept_net.policy_dim (sum of K_i for
-            #         classification + 1 per regression), NOT concept_dim (= n_concepts).
-            #         This matches the one-hot policy vector returned by forward().
+        elif concept_net == "concept_ac":
             self.concept_net = ConceptActorCritic(
                 features_dim, task_types, num_classes,
-                n_actions=n_actions,
                 temporal_encoding=temporal_encoding,
             )
-            # policy_dim > concept_dim for any env with classification concepts
-            # (e.g. DynamicObstacles: 70 vs 13).  The MLP receives a richer, correctly
-            # structured representation with no false ordinality.
-            mlp_input_dim = self.concept_net.policy_dim
-        elif method == "gvf":
-            self.concept_net = GVFConceptNetwork(
-                features_dim,
-                task_types,
-                num_classes,
-                gvf_pairing=self.gvf_pairing,
-                temporal_encoding=temporal_encoding,
-            )
-            mlp_input_dim = concept_dim + self.concept_net.num_gvf
+            mlp_input_dim = self.concept_dim
         else:
-            # no_concept
+            # none — plain PPO, no concept bottleneck
             mlp_input_dim = features_dim
 
         # ---- MLP extractor ----
@@ -219,11 +198,9 @@ class ActorCriticPolicy(nn.Module):
         else:
             self.optimizer_concept_only = None
 
-        # optimizer_concept_and_features: concept_net + features_extractor parameters
-        # Used by concept_actor_critic training so that concept signals shape the
-        # feature extractor (mirrors vanilla_freeze where concept supervision also
-        # flows through features_extractor), without touching mlp_extractor /
-        # action_net / value_net.
+        # optimizer_concept_and_features: concept_net + features_extractor parameters.
+        # Used for concept supervision so concept signals also shape the feature
+        # extractor, without touching mlp_extractor / action_net / value_net.
         if self.concept_net is not None:
             concept_and_feature_params = (
                 list(self.features_extractor.parameters()) +
@@ -288,71 +265,34 @@ class ActorCriticPolicy(nn.Module):
         concept_override: Optional[torch.Tensor] = None,
     ):
         """
-        Returns (latent, h_new, c_t, concept_extras)
+        Returns (latent, h_new, c_t, concept_extras).
         concept_extras: (V_c, concept_dists) or (None, None)
 
-        concept_override is a [B, n_concepts] tensor used by diagnostic
-        intervention evaluators. It replaces the concept bottleneck output before
-        the task policy MLP, while still advancing recurrent state normally.
+        concept_override: [B, n_concepts] tensor. When provided, replaces c_t
+        after the concept net runs but before mlp_extractor. Used for steerability
+        evaluation (correct / flipped concept interventions).
         """
         h_new = None
         V_c = None
         concept_dists = None
 
-        if self.method == "no_concept":
+        if self.concept_net_type == "none":
             latent = self.mlp_extractor(features)
             c_t = None
-        elif self.method == "vanilla_freeze":
-            c_t = self.concept_net(features)          # [B, concept_dim]
-            if concept_override is not None:
-                c_t = concept_override.to(device=features.device, dtype=c_t.dtype)
-            latent = self.mlp_extractor(c_t)
-        elif self.method == "concept_actor_critic":
-            c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)
-            if concept_override is not None:
-                c_t = self._encode_concept_override(concept_override, c_t)
-            latent = self.mlp_extractor(c_t)
-        elif self.method == "gvf":
+        elif self.concept_net_type == "cbm":
             c_t, h_new = self.concept_net(features, h_prev)
             if concept_override is not None:
-                override = concept_override.to(device=features.device, dtype=c_t.dtype)
-                c_t = c_t.clone()
-                c_t[:, : self.concept_dim] = override
+                c_t = concept_override
+            latent = self.mlp_extractor(c_t)
+        elif self.concept_net_type == "concept_ac":
+            c_t, h_new, concept_dists, V_c = self.concept_net(features, h_prev)
+            if concept_override is not None:
+                c_t = concept_override
             latent = self.mlp_extractor(c_t)
         else:
-            raise ValueError(f"Unknown method: {self.method}")
+            raise ValueError(f"Unknown concept_net: {self.concept_net_type}")
 
         return latent, h_new, c_t, (V_c, concept_dists)
-
-    def _encode_concept_override(
-        self,
-        concept_override: torch.Tensor,
-        reference: torch.Tensor,
-    ) -> torch.Tensor:
-        """Encode raw [B, n_concepts] concepts into the policy bottleneck format."""
-        override = concept_override.to(device=reference.device, dtype=reference.dtype)
-        if override.shape[1] == reference.shape[1]:
-            return override
-        if self.method != "concept_actor_critic" or not hasattr(self.concept_net, "concept_slices"):
-            raise ValueError(
-                "concept_override must match the policy bottleneck width for this method"
-            )
-        parts = []
-        for idx, ((start, end), task_type, n_cls) in enumerate(
-            zip(self.concept_net.concept_slices, self.task_types, self.num_classes)
-        ):
-            if task_type == "classification":
-                cls = override[:, idx].round().long().clamp(0, n_cls - 1)
-                parts.append(F.one_hot(cls, n_cls).to(dtype=reference.dtype))
-            else:
-                parts.append(override[:, idx : idx + 1])
-        encoded = torch.cat(parts, dim=1)
-        if encoded.shape[1] != reference.shape[1]:
-            raise ValueError(
-                f"Encoded concept override width {encoded.shape[1]} does not match "
-                f"policy bottleneck width {reference.shape[1]}"
-            )
-        return encoded
 
     # ------------------------------------------------------------------
     # evaluate_actions  (used during training)
@@ -366,30 +306,16 @@ class ActorCriticPolicy(nn.Module):
     ) -> Tuple:
         """
         Returns:
-          concepts  [B, policy_dim] or None  (Fix #2: one-hot for concept_actor_critic)
+          concepts  [B, concept_dim] or None
           values    [B]
           log_prob  [B]
           entropy   [B]
           h_new     [B, hidden_dim] or None
           V_c       [B, 1] or None
           concept_dists: list or None
-
-        Fix #1: for concept_actor_critic, actions are passed directly to concept_net
-        so Q_c(h_t, a_t) is computed in one forward pass without re-running the GRU.
-        _get_latent is used for no_concept and vanilla_freeze (no action needed there).
         """
         features = self.extract_features(obs)
-
-        if self.method == "concept_actor_critic":
-            # Pass actions so concept_net.forward() can compute Q_c(h_t, a_t).
-            # This is the training path — stored actions are available from the buffer.
-            # The return signature is the same; V_c is now action-conditional Q_c.
-            c_t, h_new, concept_dists, V_c = self.concept_net(
-                features, h_prev, actions=actions.long().flatten()
-            )
-            latent = self.mlp_extractor(c_t)
-        else:
-            latent, h_new, c_t, (V_c, concept_dists) = self._get_latent(features, h_prev)
+        latent, h_new, c_t, (V_c, concept_dists) = self._get_latent(features, h_prev)
 
         action_logits = self.action_net(latent)
         dist = Categorical(logits=action_logits)
@@ -426,13 +352,14 @@ class ActorCriticPolicy(nn.Module):
         deterministic: bool = False,
         concept_override: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Returns (action, h_new)."""
+        """
+        Returns (action, h_new).
+        concept_override: [B, n_concepts] — replaces concept bottleneck output
+        when set. Pass None for normal inference.
+        """
         features = self.extract_features(obs)
-        latent, h_new, _, _ = self._get_latent(
-            features,
-            h_prev,
-            concept_override=concept_override,
-        )
+        latent, h_new, _, _ = self._get_latent(features, h_prev,
+                                                concept_override=concept_override)
         action_logits = self.action_net(latent)
         if deterministic:
             action = action_logits.argmax(dim=1)

@@ -11,12 +11,19 @@ from runtime_utils import get_obs_shape
 from steerability_eval import evaluate_steerability
 
 
+_METHOD_TO_CONCEPT_NET = {
+    "no_concept": "none",
+    "vanilla_freeze": "cbm",
+    "concept_actor_critic": "concept_ac",
+}
+
+
 def make_policy(method: str = "concept_actor_critic"):
     env = make_single_env("tmaze", seed=0, temporal_encoding="gru")
     policy = ActorCriticPolicy(
         obs_shape=get_obs_shape(env),
         n_actions=env.action_space.n,
-        method=method,
+        concept_net=_METHOD_TO_CONCEPT_NET[method],
         task_types=env.task_types,
         num_classes=env.num_classes,
         concept_dim=len(env.task_types),
