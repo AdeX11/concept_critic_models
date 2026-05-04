@@ -34,7 +34,7 @@ METHODS = ["none", "cbm", "concept_ac"]
 METHOD_LABELS = {
     "none":       "PPO (no concepts)",
     "cbm":        "CBM",
-    "concept_ac": "Concept AC",
+    "concept_ac": "Concept-AC",
 }
 
 TEMPORAL_LABELS = {
@@ -47,6 +47,75 @@ SUPERVISION_LABELS = {
     "none":    "none (pure AC reward)",
     "queried": "queried (sparse labels)",
 }
+
+# ---------------------------------------------------------------------------
+# Unified style palette — each run config gets a unique (color, marker, linestyle)
+# ---------------------------------------------------------------------------
+
+# Base colors per concept_net
+CN_COLORS = {
+    "concept_ac": "#2ca02c",   # green
+    "cbm":        "#ff7f0e",   # orange
+    "none":       "#888888",   # gray
+}
+
+# Marker shapes per supervision mode (most distinctive factor visually)
+SUP_MARKERS = {
+    "online":  "o",    # circle
+    "none":    "s",    # square
+    "queried": "^",    # triangle
+}
+
+# Linestyle per freeze mode
+FREEZE_LINESTYLES = {
+    "frozen":  "-",     # solid
+    "coupled": "--",    # dashed
+}
+
+# Linewidth boost for GRU (the main model of interest)
+TEMPORAL_LINEWIDTH = {
+    "gru":  2.0,
+    "none": 1.3,
+}
+
+def get_run_style(concept_net: str, temporal: str, supervision: str, freeze: str) -> dict:
+    """Return consistent (color, marker, linestyle, linewidth, zorder) for a run config."""
+    return {
+        "color":     CN_COLORS.get(concept_net, "#999999"),
+        "marker":    SUP_MARKERS.get(supervision, "o"),
+        "linestyle": FREEZE_LINESTYLES.get(freeze, "-"),
+        "linewidth": TEMPORAL_LINEWIDTH.get(temporal, 1.5),
+        "zorder":    5 if concept_net == "concept_ac" else (4 if concept_net == "cbm" else 2),
+        "alpha":     0.9,
+    }
+
+def make_run_label(concept_net: str, temporal: str, supervision: str, freeze: str) -> str:
+    """Compact human-readable run label."""
+    cn = METHOD_LABELS.get(concept_net, concept_net)
+    tmp = TEMPORAL_LABELS.get(temporal, temporal)
+    sup = {"online": "online", "none": "AC-only", "queried": "queried"}.get(supervision, supervision)
+    frz = freeze  # "frozen" or "coupled"
+    return f"{cn} | {tmp} | {sup} | {frz}"
+
+# Run iteration order — consistent across all plots
+RUN_ORDER = [
+    # concept_ac × all combos (most important)
+    ("concept_ac", "gru",   "online",  "frozen"),
+    ("concept_ac", "gru",   "online",  "coupled"),
+    ("concept_ac", "gru",   "none",    "frozen"),
+    ("concept_ac", "gru",   "none",    "coupled"),
+    ("concept_ac", "none",  "online",  "frozen"),
+    ("concept_ac", "none",  "online",  "coupled"),
+    ("concept_ac", "none",  "none",    "frozen"),
+    ("concept_ac", "none",  "none",    "coupled"),
+    # cbm × all combos
+    ("cbm",        "gru",   "online",  "frozen"),
+    ("cbm",        "gru",   "online",  "coupled"),
+    ("cbm",        "none",  "online",  "frozen"),
+    ("cbm",        "none",  "online",  "coupled"),
+    # PPO baseline (last)
+    ("none",       "none",  "online",  "frozen"),
+]
 
 ENV_REWARD_REF = {
     "tmaze":              {"max": 0.89,   "label": "theoretical max (0.89)"},
@@ -219,59 +288,63 @@ def _save(fig, path: str) -> None:
 def plot_final_reward_bar(runs: Dict, out_dir: str, env: str) -> None:
     """
     Horizontal bar chart of final eval reward for every run, sorted by reward.
-    Gives an at-a-glance ranking of all 19 variants.
+    Color-coded by concept_net with compact labels.
     """
     entries = []
 
-    # PPO baseline
-    if "none" in runs:
-        for temp_d in runs["none"].values():
-            for sup_d in temp_d.values():
-                for freeze_d in sup_d.values():
-                    r = _seed_mean_reward(freeze_d)
-                    entries.append(("PPO baseline", r, "#888888"))
-
-    colors = {
-        "cbm":        "#ff7f0e",
-        "concept_ac": "#2ca02c",
-    }
-    for concept_net in ["cbm", "concept_ac"]:
-        if concept_net not in runs:
+    for cn, tmp, sup, frz in RUN_ORDER:
+        try:
+            seed_dict = runs[cn][tmp][sup][frz]
+        except KeyError:
             continue
-        for temporal, sup_d in runs[concept_net].items():
-            for supervision, freeze_d in sup_d.items():
-                for freeze, seed_dict in freeze_d.items():
-                    r = _seed_mean_reward(seed_dict)
-                    sup_str = {"online": "online", "none": "AC-only", "queried": "queried"}.get(supervision, supervision)
-                    label = f"{METHOD_LABELS[concept_net]} | {TEMPORAL_LABELS[temporal]} | {sup_str} | {freeze}"
-                    entries.append((label, r, colors[concept_net]))
+        r = _seed_mean_reward(seed_dict)
+        if np.isnan(r):
+            continue
+        style = get_run_style(cn, tmp, sup, frz)
+        label = make_run_label(cn, tmp, sup, frz)
+        entries.append((label, r, style["color"], style))
 
     if not entries:
         return
 
     entries.sort(key=lambda x: x[1])
-    labels, values, bar_colors = zip(*entries)
+    labels, values, bar_colors, _styles = zip(*entries)
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(entries) * 0.38)))
+    fig, ax = plt.subplots(figsize=(10, max(6, len(entries) * 0.35)))
     y = np.arange(len(entries))
-    bars = ax.barh(y, values, color=bar_colors, alpha=0.8, edgecolor="white")
+    bars = ax.barh(y, values, color=bar_colors, alpha=0.85, edgecolor="white", linewidth=0.5)
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_yticklabels(labels, fontsize=8.5)
     ax.set_xlabel("Final eval reward", fontsize=12)
-    ax.set_title(f"Final Reward — All Variants ({env})", fontsize=13)
+    ax.set_title(f"Final Reward — All Variants ({env})", fontsize=13, fontweight="bold")
     ax.grid(True, alpha=0.3, axis="x")
 
     ref = ENV_REWARD_REF.get(env)
     if ref and ref["max"] is not None:
         ax.axvline(ref["max"], color="black", linestyle="--", linewidth=1.0,
                    alpha=0.5, label=ref["label"])
-        ax.legend(fontsize=9)
+        # Add color legend for concept_net
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=CN_COLORS["concept_ac"], alpha=0.85, label=METHOD_LABELS["concept_ac"]),
+            Patch(facecolor=CN_COLORS["cbm"],        alpha=0.85, label=METHOD_LABELS["cbm"]),
+            Patch(facecolor=CN_COLORS["none"],       alpha=0.85, label=METHOD_LABELS["none"]),
+        ]
+        ax.legend(handles=legend_elements, fontsize=8, loc="lower right")
+    else:
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=CN_COLORS["concept_ac"], alpha=0.85, label=METHOD_LABELS["concept_ac"]),
+            Patch(facecolor=CN_COLORS["cbm"],        alpha=0.85, label=METHOD_LABELS["cbm"]),
+            Patch(facecolor=CN_COLORS["none"],       alpha=0.85, label=METHOD_LABELS["none"]),
+        ]
+        ax.legend(handles=legend_elements, fontsize=8, loc="lower right")
 
     # Value labels on bars
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + 0.005 * abs(bar.get_width() or 1),
                 bar.get_y() + bar.get_height() / 2,
-                f"{val:.2f}", va="center", fontsize=8)
+                f"{val:.1f}", va="center", fontsize=7.5, fontweight="bold")
 
     plt.tight_layout()
     _save(fig, os.path.join(out_dir, "final_reward_bar.png"))
@@ -377,44 +450,52 @@ def plot_heatmap(runs: Dict, out_dir: str, env: str) -> None:
 
 def plot_focused_curves(runs: Dict, out_dir: str, env: str, window: int = 30) -> None:
     """
-    4-panel figure, each subplot answering one ablation question using 2-4
-    carefully chosen runs rather than all 19.
-
-    Q1: Does temporal encoding matter?   → concept_ac, online, frozen: gru vs stacked vs none
-    Q2: Does AC signal help over CBM?    → gru, online, frozen: cbm vs concept_ac
-    Q3: Does e2e training help?          → concept_ac, gru, online: frozen vs coupled
-    Q4: Does label supervision help AC?  → concept_ac, gru, frozen: online vs none
+    4-panel figure, each subplot answering one ablation question.
+    Uses consistent markers every N points so lines are distinguishable
+    even in grayscale or when colors overlap.
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = axes.flatten()
+    MARK_EVERY = max(1, window // 2)  # place marker every ~half-window
 
-    def _plot_curve(ax, seed_dict, label, color, lw=2.0):
+    def _plot_curve(ax, seed_dict, label, style=None, **kwargs):
+        """Plot with optional unified style dict."""
         mean_c, std_c = _seed_rewards_array(seed_dict)
         if mean_c is None:
             return False
         mean_s = smooth(mean_c, window)
         std_s  = smooth(std_c,  window)
         x = np.arange(len(mean_s))
-        ax.plot(x, mean_s, label=label, color=color, linewidth=lw)
-        ax.fill_between(x, mean_s - std_s, mean_s + std_s, alpha=0.15, color=color)
+        if style:
+            kwargs.setdefault("color",     style["color"])
+            kwargs.setdefault("linestyle", style["linestyle"])
+            kwargs.setdefault("linewidth", style["linewidth"])
+            kwargs.setdefault("alpha",     style["alpha"])
+            kwargs.setdefault("zorder",    style["zorder"])
+            kwargs.setdefault("marker",    style["marker"])
+            kwargs.setdefault("markersize", 5)
+            kwargs.setdefault("markevery", MARK_EVERY)
+        ax.plot(x, mean_s, label=label, **kwargs)
+        ax.fill_between(x, mean_s - std_s, mean_s + std_s,
+                        alpha=0.12, color=kwargs.get("color", "gray"))
         return True
 
     def _setup(ax, title, xlabel="Episode", ylabel="Reward"):
         ax.set_title(title, fontsize=12, fontweight="bold")
         ax.set_xlabel(xlabel, fontsize=10)
         ax.set_ylabel(ylabel, fontsize=10)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=8.5, framealpha=0.9)
         ax.grid(True, alpha=0.3)
         _add_ref_line(ax, env)
 
     # ---- Q1: temporal encoding ----
     ax = axes[0]
     plotted = False
-    colors = {"gru": "#2ca02c", "none": "#d62728"}
     for temp in ["gru", "none"]:
         try:
             sd = runs["concept_ac"][temp]["online"]["frozen"]
-            plotted |= _plot_curve(ax, sd, TEMPORAL_LABELS[temp], colors[temp])
+            style = get_run_style("concept_ac", temp, "online", "frozen")
+            plotted |= _plot_curve(ax, sd, TEMPORAL_LABELS[temp], style)
         except KeyError:
             pass
     if "none" in runs:
@@ -422,20 +503,23 @@ def plot_focused_curves(runs: Dict, out_dir: str, env: str, window: int = 30) ->
             sd = list(runs["none"].values())[0]
             sd = list(sd.values())[0]
             sd = list(sd.values())[0]
-            _plot_curve(ax, sd, "PPO baseline", "#888888", lw=1.4)
+            style_none = get_run_style("none", "none", "online", "frozen")
+            style_none["markersize"] = 4
+            _plot_curve(ax, sd, "PPO baseline", style_none)
             plotted = True
         except (KeyError, StopIteration, IndexError):
             pass
     if plotted:
-        _setup(ax, "Q1: Does temporal encoding matter?\n(Concept AC, online, frozen)")
+        _setup(ax, "Q1: Does temporal encoding matter?\n(Concept-AC, online, frozen)")
 
     # ---- Q2: AC signal vs CBM ----
     ax = axes[1]
     plotted = False
-    for cn, color in [("cbm", "#ff7f0e"), ("concept_ac", "#2ca02c")]:
+    for cn in ["cbm", "concept_ac"]:
         try:
             sd = runs[cn]["gru"]["online"]["frozen"]
-            plotted |= _plot_curve(ax, sd, METHOD_LABELS[cn], color)
+            style = get_run_style(cn, "gru", "online", "frozen")
+            plotted |= _plot_curve(ax, sd, METHOD_LABELS[cn], style)
         except KeyError:
             pass
     if plotted:
@@ -444,29 +528,29 @@ def plot_focused_curves(runs: Dict, out_dir: str, env: str, window: int = 30) ->
     # ---- Q3: frozen vs coupled ----
     ax = axes[2]
     plotted = False
-    colors3 = {"frozen": "#2ca02c", "coupled": "#d62728"}
     for frz in ["frozen", "coupled"]:
         try:
             sd = runs["concept_ac"]["gru"]["online"][frz]
-            plotted |= _plot_curve(ax, sd, frz, colors3[frz])
+            style = get_run_style("concept_ac", "gru", "online", frz)
+            plotted |= _plot_curve(ax, sd, frz, style)
         except KeyError:
             pass
     if plotted:
-        _setup(ax, "Q3: Does end-to-end training help?\n(Concept AC, GRU, online)")
+        _setup(ax, "Q3: Does end-to-end training help?\n(Concept-AC, GRU, online)")
 
     # ---- Q4: supervision=online vs none (pure AC) ----
     ax = axes[3]
     plotted = False
-    colors4 = {"online": "#2ca02c", "none": "#9467bd"}
     labels4 = {"online": "online (labels + AC)", "none": "none (pure AC reward)"}
     for sup in ["online", "none"]:
         try:
             sd = runs["concept_ac"]["gru"][sup]["frozen"]
-            plotted |= _plot_curve(ax, sd, labels4[sup], colors4[sup])
+            style = get_run_style("concept_ac", "gru", sup, "frozen")
+            plotted |= _plot_curve(ax, sd, labels4[sup], style)
         except KeyError:
             pass
     if plotted:
-        _setup(ax, "Q4: Does label supervision help Concept AC?\n(GRU, frozen)")
+        _setup(ax, "Q4: Does label supervision help Concept-AC?\n(GRU, frozen)")
 
     fig.suptitle(f"Ablation Study — {env}", fontsize=14, y=1.01)
     plt.tight_layout()
@@ -479,34 +563,33 @@ def plot_focused_curves(runs: Dict, out_dir: str, env: str, window: int = 30) ->
 
 def plot_acc_vs_reward_scatter(runs: Dict, out_dir: str, env: str) -> None:
     """
-    Scatter plot: x = final concept accuracy (mean over concepts),
-                  y = final eval reward.
-    Each point = one run. Shows whether concept quality correlates with reward.
+    Scatter plot: x = final concept accuracy, y = final eval reward.
+    Uses unified style palette: color=concept_net, marker=supervision.
+    Legend is split into two compact sub-legends.
     """
-    colors = {"cbm": "#ff7f0e", "concept_ac": "#2ca02c"}
-    markers = {"gru": "o", "none": "^"}
-
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(9, 6.5))
     plotted = False
 
-    for concept_net in ["cbm", "concept_ac"]:
-        if concept_net not in runs:
+    for cn, tmp, sup, frz in RUN_ORDER:
+        if cn == "none":
             continue
-        for temporal, sup_d in runs[concept_net].items():
-            for supervision, freeze_d in sup_d.items():
-                for freeze, seed_dict in freeze_d.items():
-                    acc = _seed_final_concept_acc(seed_dict)
-                    rew = _seed_mean_reward(seed_dict)
-                    if acc is None or np.isnan(rew):
-                        continue
-                    sup_str = {"online": "online", "none": "AC-only", "queried": "queried"}.get(supervision, supervision)
-                    label = f"{METHOD_LABELS[concept_net]} | {TEMPORAL_LABELS[temporal]} | {sup_str} | {freeze}"
-                    ax.scatter(acc, rew,
-                               color=colors.get(concept_net, "#999"),
-                               marker=markers.get(temporal, "o"),
-                               s=80, alpha=0.85, label=label,
-                               edgecolors="white", linewidths=0.5)
-                    plotted = True
+        try:
+            seed_dict = runs[cn][tmp][sup][frz]
+        except KeyError:
+            continue
+        acc = _seed_final_concept_acc(seed_dict)
+        rew = _seed_mean_reward(seed_dict)
+        if acc is None or np.isnan(rew):
+            continue
+        style = get_run_style(cn, tmp, sup, frz)
+        label = make_run_label(cn, tmp, sup, frz)
+        ax.scatter(acc, rew,
+                   color=style["color"],
+                   marker=style["marker"],
+                   s=90, alpha=0.85, label=label,
+                   edgecolors="white", linewidths=0.5,
+                   zorder=style["zorder"])
+        plotted = True
 
     if not plotted:
         plt.close(fig)
@@ -516,24 +599,28 @@ def plot_acc_vs_reward_scatter(runs: Dict, out_dir: str, env: str) -> None:
     acc_label = "Final concept accuracy (↑)" if all_cls else "Final concept metric"
     ax.set_xlabel(acc_label, fontsize=12)
     ax.set_ylabel("Final eval reward (↑)", fontsize=12)
-    ax.set_title(f"Concept Accuracy vs Task Reward — {env}", fontsize=13)
+    ax.set_title(f"Concept Accuracy vs Task Reward — {env}", fontsize=13, fontweight="bold")
     ax.grid(True, alpha=0.3)
 
-    # Deduplicate legend
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), fontsize=8,
-              loc="best", framealpha=0.9)
-
-    # Legend for marker shapes
+    # Split legend: concept_net by color, supervision by marker
     import matplotlib.lines as mlines
-    shape_legend = [
-        mlines.Line2D([], [], color="gray", marker=m, linestyle="None",
-                      markersize=8, label=TEMPORAL_LABELS[t])
-        for t, m in markers.items()
+    from matplotlib.patches import Patch
+
+    cn_handles = [
+        Patch(facecolor=CN_COLORS["concept_ac"], alpha=0.85, label=METHOD_LABELS["concept_ac"]),
+        Patch(facecolor=CN_COLORS["cbm"],        alpha=0.85, label=METHOD_LABELS["cbm"]),
     ]
-    ax.add_artist(ax.legend(handles=shape_legend, fontsize=9,
-                            loc="lower right", title="Temporal"))
+    leg1 = ax.legend(handles=cn_handles, fontsize=9, loc="lower right",
+                     title="Architecture", title_fontsize=9, framealpha=0.9)
+    ax.add_artist(leg1)
+
+    sup_handles = [
+        mlines.Line2D([], [], color="gray", marker=SUP_MARKERS[sup], linestyle="None",
+                      markersize=8, label=lab)
+        for sup, lab in [("online", "online"), ("none", "AC-only"), ("queried", "queried")]
+    ]
+    ax.legend(handles=sup_handles, fontsize=9, loc="upper left",
+              title="Supervision", title_fontsize=9, framealpha=0.9)
 
     _add_ref_line(ax, env)
     plt.tight_layout()
@@ -547,52 +634,46 @@ def plot_acc_vs_reward_scatter(runs: Dict, out_dir: str, env: str) -> None:
 def plot_concept_acc_gru(runs: Dict, out_dir: str, env: str, window: int = 5) -> None:
     """
     Concept accuracy over training timesteps, restricted to GRU variants.
-    GRU is the only architecture that can improve concept quality over time
-    via BPTT; non-GRU variants are flat after first supervision, so they
-    add clutter without insight.
+    Uses unified style palette with markers.
     """
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(11, 5.5))
     plotted = False
+    MARK_EVERY_ACC = max(1, window * 2)
 
-    colors = {
-        ("cbm",        "online"): "#ff7f0e",
-        ("concept_ac", "online"): "#2ca02c",
-        ("concept_ac", "none"):   "#9467bd",
-        ("concept_ac", "queried"):"#17becf",
-    }
-    lss = {"frozen": "-", "coupled": "--"}
-
-    for concept_net in ["cbm", "concept_ac"]:
-        if concept_net not in runs:
+    for cn, tmp, sup, frz in RUN_ORDER:
+        if cn == "none" or tmp != "gru":
             continue
-        gru_d = runs[concept_net].get("gru", {})
-        for supervision, freeze_d in gru_d.items():
-            for freeze, seed_dict in freeze_d.items():
-                all_ts, all_vals = None, []
-                for v in seed_dict.values():
-                    ca = v.get("concept_acc")
-                    if ca is None or len(ca["timesteps"]) == 0:
-                        continue
-                    if all_ts is None:
-                        all_ts = ca["timesteps"]
-                    all_vals.append(ca["values"].mean(axis=1))
+        try:
+            seed_dict = runs[cn][tmp][sup][frz]
+        except KeyError:
+            continue
 
-                if not all_vals or all_ts is None:
-                    continue
+        all_ts, all_vals = None, []
+        for v in seed_dict.values():
+            ca = v.get("concept_acc")
+            if ca is None or len(ca["timesteps"]) == 0:
+                continue
+            if all_ts is None:
+                all_ts = ca["timesteps"]
+            all_vals.append(ca["values"].mean(axis=1))
 
-                sup_str = {"online": "online", "none": "AC-only", "queried": "queried"}.get(supervision, supervision)
-                label = f"{METHOD_LABELS[concept_net]} GRU | {sup_str} | {freeze}"
-                color = colors.get((concept_net, supervision), "#999999")
-                ls    = lss.get(freeze, "-")
+        if not all_vals or all_ts is None:
+            continue
 
-                min_len = min(len(v) for v in all_vals)
-                arr = np.stack([v[:min_len] for v in all_vals])
-                mean_v = smooth(arr.mean(axis=0), window)
-                ts_plot = all_ts[:min_len]
+        style = get_run_style(cn, tmp, sup, frz)
+        label = make_run_label(cn, tmp, sup, frz)
 
-                ax.plot(ts_plot, mean_v, label=label, color=color,
-                        linestyle=ls, linewidth=2.0)
-                plotted = True
+        min_len = min(len(v) for v in all_vals)
+        arr = np.stack([v[:min_len] for v in all_vals])
+        mean_v = smooth(arr.mean(axis=0), window)
+        ts_plot = all_ts[:min_len]
+
+        ax.plot(ts_plot, mean_v, label=label,
+                color=style["color"], linestyle=style["linestyle"],
+                linewidth=style["linewidth"], alpha=style["alpha"],
+                marker=style["marker"], markersize=5,
+                markevery=MARK_EVERY_ACC, zorder=style["zorder"])
+        plotted = True
 
     if not plotted:
         plt.close(fig)
@@ -602,11 +683,11 @@ def plot_concept_acc_gru(runs: Dict, out_dir: str, env: str, window: int = 5) ->
     ylabel = "Concept accuracy (↑)" if all_cls else "Concept metric"
     ax.set_xlabel("Timestep", fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_title(f"Concept Accuracy Over Training — GRU variants ({env})", fontsize=13)
+    ax.set_title(f"Concept Accuracy Over Training — GRU variants ({env})", fontsize=13, fontweight="bold")
     if all_cls:
         ax.set_ylim(-0.02, 1.05)
         ax.axhline(1.0, color="black", linestyle=":", linewidth=0.8, alpha=0.5, label="perfect (1.0)")
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8, framealpha=0.9)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     _save(fig, os.path.join(out_dir, "concept_acc_gru.png"))
@@ -619,14 +700,15 @@ def plot_concept_acc_gru(runs: Dict, out_dir: str, env: str, window: int = 5) ->
 def plot_concept_acc_ablation(runs: Dict, out_dir: str, env: str, window: int = 5) -> None:
     """
     4-panel ablation for concept accuracy, mirroring plot_focused_curves.
-    Each panel answers one question using concept accuracy over timesteps.
+    Uses unified style palette with markers for consistency.
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = axes.flatten()
     all_cls = env in ENV_ALL_CLASSIFICATION
     ylabel = "Concept accuracy (↑)" if all_cls else "Concept metric"
+    MARK_EVERY_ACC = max(1, window * 2)
 
-    def _plot_acc_curve(ax, seed_dict, label, color, ls="-", lw=2.0):
+    def _plot_acc_curve(ax, seed_dict, label, style=None, **kwargs):
         all_ts, all_vals = None, []
         for v in seed_dict.values():
             ca = v.get("concept_acc")
@@ -642,8 +724,18 @@ def plot_concept_acc_ablation(runs: Dict, out_dir: str, env: str, window: int = 
         mean_v = smooth(arr.mean(axis=0), window)
         std_v  = smooth(arr.std(axis=0),  window)
         ts = all_ts[:min_len]
-        ax.plot(ts, mean_v, label=label, color=color, linestyle=ls, linewidth=lw)
-        ax.fill_between(ts, mean_v - std_v, mean_v + std_v, alpha=0.15, color=color)
+        if style:
+            kwargs.setdefault("color",     style["color"])
+            kwargs.setdefault("linestyle", style["linestyle"])
+            kwargs.setdefault("linewidth", style["linewidth"])
+            kwargs.setdefault("alpha",     style["alpha"])
+            kwargs.setdefault("zorder",    style["zorder"])
+            kwargs.setdefault("marker",    style["marker"])
+            kwargs.setdefault("markersize", 5)
+            kwargs.setdefault("markevery", MARK_EVERY_ACC)
+        ax.plot(ts, mean_v, label=label, **kwargs)
+        ax.fill_between(ts, mean_v - std_v, mean_v + std_v,
+                        alpha=0.12, color=kwargs.get("color", "gray"))
         return True
 
     def _setup(ax, title):
@@ -653,29 +745,30 @@ def plot_concept_acc_ablation(runs: Dict, out_dir: str, env: str, window: int = 
         if all_cls:
             ax.set_ylim(-0.02, 1.05)
             ax.axhline(1.0, color="black", linestyle=":", linewidth=0.8, alpha=0.4)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=8.5, framealpha=0.9)
         ax.grid(True, alpha=0.3)
 
     # ---- Q1: temporal encoding ----
     ax = axes[0]
-    colors = {"gru": "#2ca02c", "none": "#d62728"}
     plotted = False
     for temp in ["gru", "none"]:
         try:
             sd = runs["concept_ac"][temp]["online"]["frozen"]
-            plotted |= _plot_acc_curve(ax, sd, TEMPORAL_LABELS[temp], colors[temp])
+            style = get_run_style("concept_ac", temp, "online", "frozen")
+            plotted |= _plot_acc_curve(ax, sd, TEMPORAL_LABELS[temp], style)
         except KeyError:
             pass
     if plotted:
-        _setup(ax, "Q1: Does temporal encoding improve concept accuracy?\n(Concept AC, online, frozen)")
+        _setup(ax, "Q1: Does temporal encoding improve concept accuracy?\n(Concept-AC, online, frozen)")
 
     # ---- Q2: AC signal vs CBM ----
     ax = axes[1]
     plotted = False
-    for cn, color in [("cbm", "#ff7f0e"), ("concept_ac", "#2ca02c")]:
+    for cn in ["cbm", "concept_ac"]:
         try:
             sd = runs[cn]["gru"]["online"]["frozen"]
-            plotted |= _plot_acc_curve(ax, sd, METHOD_LABELS[cn], color)
+            style = get_run_style(cn, "gru", "online", "frozen")
+            plotted |= _plot_acc_curve(ax, sd, METHOD_LABELS[cn], style)
         except KeyError:
             pass
     if plotted:
@@ -684,28 +777,29 @@ def plot_concept_acc_ablation(runs: Dict, out_dir: str, env: str, window: int = 
     # ---- Q3: frozen vs coupled ----
     ax = axes[2]
     plotted = False
-    for frz, color in [("frozen", "#2ca02c"), ("coupled", "#d62728")]:
+    for frz in ["frozen", "coupled"]:
         try:
             sd = runs["concept_ac"]["gru"]["online"][frz]
-            plotted |= _plot_acc_curve(ax, sd, frz, color)
+            style = get_run_style("concept_ac", "gru", "online", frz)
+            plotted |= _plot_acc_curve(ax, sd, frz, style)
         except KeyError:
             pass
     if plotted:
-        _setup(ax, "Q3: Does end-to-end training affect concept accuracy?\n(Concept AC, GRU, online)")
+        _setup(ax, "Q3: Does end-to-end training affect concept accuracy?\n(Concept-AC, GRU, online)")
 
     # ---- Q4: supervision=online vs none ----
     ax = axes[3]
     plotted = False
     labels4 = {"online": "online (labels + AC)", "none": "none (pure AC reward)"}
-    colors4 = {"online": "#2ca02c", "none": "#9467bd"}
     for sup in ["online", "none"]:
         try:
             sd = runs["concept_ac"]["gru"][sup]["frozen"]
-            plotted |= _plot_acc_curve(ax, sd, labels4[sup], colors4[sup])
+            style = get_run_style("concept_ac", "gru", sup, "frozen")
+            plotted |= _plot_acc_curve(ax, sd, labels4[sup], style)
         except KeyError:
             pass
     if plotted:
-        _setup(ax, "Q4: Does label supervision help concept accuracy?\n(Concept AC, GRU, frozen)")
+        _setup(ax, "Q4: Does label supervision help concept accuracy?\n(Concept-AC, GRU, frozen)")
 
     fig.suptitle(f"Concept Accuracy Ablation — {env}", fontsize=14, y=1.01)
     plt.tight_layout()

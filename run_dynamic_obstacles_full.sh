@@ -7,8 +7,6 @@
 #PBS -j oe
 #PBS -o /glade/derecho/scratch/adadelek/results/dynamic_obstacles_full/run_dynamic_obstacles_full_pbs.log
 
-cd /glade/u/home/adadelek/concept_critic_models
-
 # run_dynamic_obstacles_full.sh — Architecture + technique sweep on DynamicObstacles.
 #
 # Key question: does the concept AC reward provide an advantage over CBM
@@ -28,11 +26,9 @@ N_STEPS=512
 N_EPOCHS=10
 BATCH=256
 SEED=42
-RESULTS_DIR=/glade/derecho/scratch/adadelek/results/dynamic_obstacles_full
+RESULTS_DIR=results/dynamic_obstacles_full
 PLOTS_DIR=plots/dynamic_obstacles_full
-VENV=/glade/derecho/scratch/adadelek/venv
 
-source $VENV/bin/activate
 mkdir -p $RESULTS_DIR $PLOTS_DIR
 
 PIDS=()
