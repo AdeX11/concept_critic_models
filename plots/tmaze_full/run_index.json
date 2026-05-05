@@ -1,0 +1,145 @@
+{
+  "cbm_gru_online_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -1.11,
+        "std": 0.0
+      }
+    }
+  },
+  "cbm_gru_online_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": 0.89,
+        "std": 0.0
+      }
+    }
+  },
+  "cbm_none_online_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.0267,
+        "std": 0.9965
+      }
+    }
+  },
+  "cbm_none_online_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.11,
+        "std": 1.0
+      }
+    }
+  },
+  "concept_ac_gru_none_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.9,
+        "std": 0.0
+      }
+    }
+  },
+  "concept_ac_gru_none_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -1.11,
+        "std": 0.0
+      }
+    }
+  },
+  "concept_ac_gru_online_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -1.0429,
+        "std": 0.107
+      }
+    }
+  },
+  "concept_ac_gru_online_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": 0.89,
+        "std": 0.0
+      }
+    }
+  },
+  "concept_ac_none_none_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.45,
+        "std": 0.0
+      }
+    }
+  },
+  "concept_ac_none_none_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.45,
+        "std": 0.0
+      }
+    }
+  },
+  "concept_ac_none_online_coupled": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.2767,
+        "std": 0.986
+      }
+    }
+  },
+  "concept_ac_none_online_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.2767,
+        "std": 0.986
+      }
+    }
+  },
+  "none_none_online_frozen": {
+    "seeds": [
+      42
+    ],
+    "eval": {
+      "42": {
+        "mean": -0.11,
+        "std": 1.0
+      }
+    }
+  }
+}

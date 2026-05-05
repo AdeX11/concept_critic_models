@@ -1,0 +1,17 @@
+===============================================================================================
+concept_net   temporal    supervision   freeze     mean_reward  std_reward  concept_acc   seeds
+-----------------------------------------------------------------------------------------------
+cbm           gru         online        frozen            0.89        0.00       0.864       1
+concept_ac    gru         online        frozen            0.89        0.00       0.542       1
+cbm           none        online        coupled          -0.03        0.00       0.152       1
+none          none        online        frozen           -0.11        0.00           —       1
+cbm           none        online        frozen           -0.11        0.00       0.714       1
+concept_ac    none        online        coupled          -0.28        0.00       0.775       1
+concept_ac    none        online        frozen           -0.28        0.00       0.875       1
+concept_ac    none        none          coupled          -0.45        0.00       0.261       1
+concept_ac    none        none          frozen           -0.45        0.00       0.500       1
+concept_ac    gru         none          coupled          -0.90        0.00       0.917       1
+concept_ac    gru         online        coupled          -1.04        0.00       1.000       1
+cbm           gru         online        coupled          -1.11        0.00       0.810       1
+concept_ac    gru         none          frozen           -1.11        0.00       0.727       1
+===============================================================================================

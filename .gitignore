@@ -5,7 +5,6 @@ __pycache__/
 
 # Results and model checkpoints (large — stored in scratch)
 results/
-plots/
 *.npy
 *.npz
 *.pt
