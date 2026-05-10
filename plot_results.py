@@ -120,6 +120,8 @@ RUN_ORDER = [
 ENV_REWARD_REF = {
     "tmaze":              {"max": 0.89,   "label": "theoretical max (0.89)"},
     "cartpole":           {"max": 500.0,  "label": "max (500)"},
+    "highway":            {"max": None,   "label": None},
+    "highway_state":      {"max": None,   "label": None},
     "lunar_lander":       {"max": 200.0,  "label": "solved (200)"},
     "mountain_car":       {"max": -110.0, "label": "solved (-110)"},
     "hidden_velocity":    {"max": None,   "label": None},
@@ -970,8 +972,8 @@ def write_run_index(runs: Dict, out_dir: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only",
+                        choices=["cartpole", "dynamic_obstacles", "highway", "highway_state",
+                                 "lunar_lander", "lunar_lander_state", "lunar_lander_pos_only",
                                  "mountain_car", "hidden_velocity", "tmaze"])
     parser.add_argument("--methods", nargs="+", default=METHODS, choices=METHODS)
     parser.add_argument("--results_dir", type=str,

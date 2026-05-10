@@ -33,6 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from envs.cartpole        import make_cartpole_env,          make_single_cartpole_env
 from envs.dynamic_obstacles import make_dynamic_obstacles_env, make_single_dynamic_obstacles_env
+from envs.highway         import (make_highway_env,           make_single_highway_env,
+                                   make_highway_state_env,     make_single_highway_state_env)
 from envs.lunar_lander    import (make_lunar_lander_env,           make_single_lunar_lander_env,
                                    make_lunar_lander_state_env,      make_single_lunar_lander_state_env,
                                    make_lunar_lander_pos_only_env,   make_single_lunar_lander_pos_only_env)
@@ -77,6 +79,12 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander":
         vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
         single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
+    elif env_name == "highway":
+        vec_env    = make_highway_env(n_envs, seed, n_stack=n_stack)
+        single_env = make_single_highway_env(seed, n_stack=n_stack)
+    elif env_name == "highway_state":
+        vec_env    = make_highway_state_env(n_envs, seed)
+        single_env = make_single_highway_state_env(seed)
     elif env_name == "lunar_lander_state":
         vec_env    = make_lunar_lander_state_env(n_envs, seed)
         single_env = make_single_lunar_lander_state_env(seed)
@@ -96,7 +104,7 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
         raise ValueError(f"Unknown env: {env_name}")
 
     # low-dim obs envs use a smaller feature extractor
-    features_dim = 128 if env_name in ("hidden_velocity", "tmaze") else 512
+    features_dim = 128 if env_name in ("hidden_velocity", "tmaze", "highway_state") else 512
 
     policy_kwargs = dict(
         obs_shape     = get_obs_shape(single_env),
@@ -124,8 +132,8 @@ def main() -> None:
                              "'cbm' (supervised concept bottleneck), "
                              "'concept_ac' (concept actor-critic)")
     parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander",
-                                 "lunar_lander_state", "lunar_lander_pos_only",
+                        choices=["cartpole", "dynamic_obstacles", "highway", "highway_state",
+                                 "lunar_lander", "lunar_lander_state", "lunar_lander_pos_only",
                                  "mountain_car", "hidden_velocity", "tmaze"])
     parser.add_argument("--temporal", type=str, default="none",
                         choices=["gru", "stacked", "none"],

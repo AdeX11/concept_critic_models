@@ -36,6 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from envs.cartpole          import make_cartpole_env,           make_single_cartpole_env
 from envs.dynamic_obstacles import make_dynamic_obstacles_env,  make_single_dynamic_obstacles_env
+from envs.highway           import (make_highway_env,           make_single_highway_env,
+                                     make_highway_state_env,     make_single_highway_state_env)
 from envs.lunar_lander      import (make_lunar_lander_env,      make_single_lunar_lander_env,
                                      make_lunar_lander_state_env, make_single_lunar_lander_state_env)
 from ppo.ppo                import PPO
@@ -81,6 +83,12 @@ def make_env_and_policy_kwargs(env_name: str, n_envs: int, seed: int, n_stack: i
     elif env_name == "lunar_lander":
         vec_env    = make_lunar_lander_env(n_envs, seed, n_stack=n_stack)
         single_env = make_single_lunar_lander_env(seed, n_stack=n_stack)
+    elif env_name == "highway":
+        vec_env    = make_highway_env(n_envs, seed, n_stack=n_stack)
+        single_env = make_single_highway_env(seed, n_stack=n_stack)
+    elif env_name == "highway_state":
+        vec_env    = make_highway_state_env(n_envs, seed)
+        single_env = make_single_highway_state_env(seed)
     elif env_name == "lunar_lander_state":
         vec_env    = make_lunar_lander_state_env(n_envs, seed)
         single_env = make_single_lunar_lander_state_env(seed)
@@ -472,7 +480,8 @@ def write_summary_table(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare concept_net types on a single environment.")
     parser.add_argument("--env",    required=True,
-                        choices=["cartpole", "dynamic_obstacles", "lunar_lander", "lunar_lander_state"])
+                        choices=["cartpole", "dynamic_obstacles", "highway", "highway_state",
+                                 "lunar_lander", "lunar_lander_state"])
     parser.add_argument("--methods", nargs="+", default=METHODS,
                         choices=METHODS, help="Subset of concept_net types to compare")
     parser.add_argument("--temporal", type=str, default="none",
